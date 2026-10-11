@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom fixture</title>
+  <id>urn:fixture:atom</id>
+  <updated>2026-10-10T08:00:00Z</updated>
+  <entry>
+    <title>Atom entry about LLM evaluation</title>
+    <link href="https://example.com/posts/llm-eval?utm_term=a&amp;page=2"/>
+    <id>urn:fixture:atom:1</id>
+    <updated>2026-10-10T08:00:00+02:00</updated>
+    <summary type="html">&lt;p&gt;Evaluating LLM agents in CI.&lt;/p&gt;</summary>
+  </entry>
+</feed>

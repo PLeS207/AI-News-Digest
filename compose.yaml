@@ -1,0 +1,75 @@
+name: ai-news-digest
+
+x-common: &common
+  build: .
+  image: ai-news-digest:local
+  restart: unless-stopped
+  env_file: .env
+
+services:
+  researcher:
+    <<: *common
+    command: ["python", "-m", "ai_news_digest.researcher.server"]
+    environment:
+      RESEARCHER_HOST: 0.0.0.0
+      RESEARCHER_PORT: "9100"
+      # URL advertised in the Agent Card; resolvable inside the Compose network only.
+      RESEARCHER_PUBLIC_URL: http://researcher:9100
+      TRACE_DIR: /data/traces
+      SOURCES_FILE: /app/config/sources.toml
+    volumes:
+      - researcher_traces:/data/traces
+    expose:
+      - "9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9100/.well-known/agent-card.json', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  app:
+    <<: *common
+    command: ["python", "-m", "ai_news_digest.telegram_bot"]
+    depends_on:
+      researcher:
+        condition: service_healthy
+    environment:
+      RESEARCHER_URL: http://researcher:9100
+      EDITOR_DB_PATH: /data/editor/memory.sqlite3
+      TRACE_DIR: /data/traces
+      SOURCES_FILE: /app/config/sources.toml
+    volumes:
+      - editor_memory:/data/editor
+      - editor_traces:/data/traces
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, time, sys; sys.exit(0 if time.time() - os.path.getmtime('/tmp/app-heartbeat') < 90 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  dashboard:
+    build: .
+    image: ai-news-digest:local
+    restart: unless-stopped
+    # No secrets needed: the dashboard only reads trace files (read-only mounts).
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501",
+              "--server.headless=true", "--browser.gatherUsageStats=false"]
+    environment:
+      TRACE_FILES: /traces/editor/editor/events.jsonl,/traces/researcher/researcher/events.jsonl
+    volumes:
+      - editor_traces:/traces/editor:ro
+      - researcher_traces:/traces/researcher:ro
+    ports:
+      - "127.0.0.1:8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  editor_memory:
+  editor_traces:
+  researcher_traces:

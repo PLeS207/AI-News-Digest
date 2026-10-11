@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>Hugging Face Blog (fixture)</title>
+  <link>https://huggingface.co/blog</link>
+  <description>Synthetic fixture: the real feed has empty item descriptions</description>
+  <item>
+    <title>Building MCP servers with smolagents</title>
+    <link>https://huggingface.co/blog/mcp-smolagents</link>
+    <description></description>
+    <pubDate>Sat, 10 Oct 2026 09:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Building MCP servers with smolagents (duplicate link with tracking)</title>
+    <link>https://huggingface.co/blog/mcp-smolagents/?utm_campaign=x#top</link>
+    <description></description>
+    <pubDate>Sat, 10 Oct 2026 09:05:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Open LLM leaderboard update</title>
+    <link>https://huggingface.co/blog/leaderboard?id=42&amp;fbclid=abc</link>
+    <description></description>
+    <pubDate>Wed, 07 Oct 2026 18:00:00 GMT</pubDate>
+  </item>
+</channel>
+</rss>

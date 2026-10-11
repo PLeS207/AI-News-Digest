@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>AWS What's New (fixture)</title>
+  <link>https://aws.amazon.com/new/</link>
+  <description>Synthetic fixture with AI and non-AI announcements</description>
+  <item>
+    <title>Amazon Bedrock AgentCore adds MCP gateway targets</title>
+    <link>https://aws.amazon.com/about-aws/whats-new/2026/10/bedrock-agentcore-mcp/</link>
+    <description>&lt;p&gt;Amazon Bedrock AgentCore now lets you expose existing APIs as &lt;a href="#"&gt;MCP&lt;/a&gt; tools for agents.&lt;/p&gt;</description>
+    <pubDate>Fri, 09 Oct 2026 22:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Amazon EC2 R8gd instances are now available in additional regions</title>
+    <link>https://aws.amazon.com/about-aws/whats-new/2026/10/ec2-r8gd-regions/</link>
+    <description>&lt;p&gt;Memory-optimized instances with local NVMe storage.&lt;/p&gt;</description>
+    <pubDate>Fri, 09 Oct 2026 19:29:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Amazon RDS for PostgreSQL supports minor version 17.9</title>
+    <link>https://aws.amazon.com/about-aws/whats-new/2026/10/rds-postgresql-17-9/</link>
+    <description>&lt;p&gt;Database engine update.&lt;/p&gt;</description>
+    <pubDate>Thu, 08 Oct 2026 12:00:00 GMT</pubDate>
+  </item>
+  <item>
+    <title>Amazon SageMaker HyperPod adds inference autoscaling</title>
+    <link>https://aws.amazon.com/about-aws/whats-new/2026/10/sagemaker-hyperpod-inference/</link>
+    <description>&lt;p&gt;Scale model inference endpoints automatically.&lt;/p&gt;</description>
+    <pubDate>Wed, 07 Oct 2026 20:00:00 GMT</pubDate>
+  </item>
+</channel>
+</rss>
