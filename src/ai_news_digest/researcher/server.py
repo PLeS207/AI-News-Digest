@@ -139,9 +139,11 @@ def build_app(researcher: Researcher, tracer: Tracer, public_url: str) -> Starle
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    fake_mode = os.environ.get("RESEARCHER_LLM", "anthropic") == "fake"
     try:
         llm_cfg = load_llm_config()
-        require_api_key(llm_cfg)
+        if not fake_mode:
+            require_api_key(llm_cfg)
         sources = load_sources()
     except ConfigError as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
@@ -149,10 +151,22 @@ def main() -> None:
     port = int(os.environ.get("RESEARCHER_PORT", "9100"))
     public_url = os.environ.get("RESEARCHER_PUBLIC_URL", f"http://localhost:{port}")
     tracer = Tracer("researcher", trace_dir())
-    llm: LLMBackend = AnthropicBackend(llm_cfg)
-    researcher = Researcher(llm=llm, sources=sources, limits=load_limits(), tracer=tracer)
+    fixed_now = None
+    if fake_mode:  # OFFLINE integration check only: scripted LLM + fixture feeds, never in the live setup
+        from datetime import datetime
+
+        from ai_news_digest.agents.llm import ScriptedBackend
+        from ai_news_digest.testing.fakes import researcher_script
+
+        llm: LLMBackend = ScriptedBackend(researcher_script, model="fake-researcher")
+        if os.environ.get("RESEARCHER_FIXED_NOW"):
+            fixed_now = datetime.fromisoformat(os.environ["RESEARCHER_FIXED_NOW"])
+        log.warning("RESEARCHER_LLM=fake: scripted LLM for offline checks (not a live configuration)")
+    else:
+        llm = AnthropicBackend(llm_cfg)
+    researcher = Researcher(llm=llm, sources=sources, limits=load_limits(), tracer=tracer, fixed_now=fixed_now)
     log.info("Researcher A2A server on %s:%s (card url %s, model %s, sources %s)",
-             host, port, public_url, llm_cfg.model, [s.id for s in sources])
+             host, port, public_url, llm.model, [s.id for s in sources])
     uvicorn.run(build_app(researcher, tracer, public_url), host=host, port=port, log_level="info")
 
 

@@ -4,25 +4,28 @@ import pytest
 
 from ai_news_digest.agents.llm import ScriptedBackend, fake_response, tool_use
 from ai_news_digest.agents.runtime import AgentLimitError, AgentSpec, ToolPermissionError, run_agent
-from ai_news_digest.editor.agent import build_registry as editor_registry
+from ai_news_digest.coordinator.tools import ALLOWED_TOOL_NAMES, CoordinatorToolRegistry, ToolNotAllowed, TurnState
 from ai_news_digest.researcher.agent import build_registry as researcher_registry
 from ai_news_digest.tracing import read_events
 
 
 def test_registries_are_disjoint_and_minimal():
-    editor = set(editor_registry().names)
+    coordinator = set(ALLOWED_TOOL_NAMES)
     researcher = set(researcher_registry().names)
     assert researcher == {"fetch_rss", "submit_selection"}
-    assert editor == {"get_user_settings", "update_user_settings", "get_digest_history",
-                      "show_last_digest", "request_research", "submit_digest"}
-    assert not editor & researcher
-    assert not any("rss" in n or "fetch" in n or "web" in n for n in editor)
+    assert coordinator == {"get_user_settings", "update_user_settings", "get_digest_history",
+                           "show_last_digest", "request_research", "submit_digest", "reply"}
+    assert not coordinator & researcher
+    assert not any("rss" in n or "fetch" in n or "web" in n for n in coordinator)
     assert not any("telegram" in n or "settings" in n or "memory" in n for n in researcher)
 
 
 async def test_dispatch_rejects_other_roles_tools():
-    with pytest.raises(ToolPermissionError):
-        await editor_registry().dispatch("fetch_rss", {"source_id": "openai_news"}, ctx=None)
+    reg = CoordinatorToolRegistry(ctx=None)
+    state = TurnState(trace_id="tr_perm00001", chat_key="c", intent=None)
+    for name in ("fetch_rss", "web_fetch", "exec", "sessions_spawn"):
+        with pytest.raises(ToolNotAllowed):
+            await reg.dispatch(name, "{}", state)
     with pytest.raises(ToolPermissionError):
         await researcher_registry().dispatch("update_user_settings", {"max_items": 10}, ctx=None)
     with pytest.raises(ToolPermissionError):

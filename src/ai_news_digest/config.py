@@ -124,7 +124,28 @@ def trace_dir() -> Path:
 
 
 def editor_db_path() -> Path:
+    """Application memory DB (kept at the pre-migration path so existing volumes keep working)."""
     return Path(_env("EDITOR_DB_PATH", "data/editor/memory.sqlite3") or "data/editor/memory.sqlite3")
+
+
+def openclaw_url() -> str:
+    return _env("OPENCLAW_URL", "http://localhost:18789") or "http://localhost:18789"
+
+
+def openclaw_agent_id() -> str:
+    return _env("OPENCLAW_AGENT_ID", "editor") or "editor"
+
+
+def openclaw_timeout_seconds() -> float:
+    return float(_env_int("OPENCLAW_TIMEOUT_SECONDS", 600))
+
+
+def openclaw_gateway_token() -> str:
+    token = _env("OPENCLAW_GATEWAY_TOKEN")
+    if not token or len(token) < 24:
+        raise ConfigError("OPENCLAW_GATEWAY_TOKEN is not set (or shorter than 24 chars). "
+                          "Generate one with: openssl rand -hex 32")
+    return token
 
 
 def researcher_url() -> str:

@@ -1,0 +1,16 @@
+{
+  "id": "digest-telemetry",
+  "name": "AI News Digest telemetry",
+  "description": "Writes OpenClaw runtime hook events (model calls, tools, runs) to a JSONL trace file and blocks tools outside the Coordinator allowlist.",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "traceFile": { "type": "string" },
+      "allowedTools": { "type": "array", "items": { "type": "string" } },
+      "workspaceMarker": { "type": "string" }
+    },
+    "required": ["traceFile", "allowedTools"]
+  }
+}

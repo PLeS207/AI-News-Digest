@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from ai_news_digest.models import RESEARCH_REQUEST_MEDIA_TYPE, ResearchRequest, ResearchResult
 from ai_news_digest.tracing import Tracer
 
-AGENT = "editor"
+AGENT = "app"
 
 
 class ResearcherUnavailable(RuntimeError):

@@ -1,35 +1,39 @@
 # HOMEWORK CHECKLIST
 
 Статусы:
-- ✅ **offline** — проверено автоматическими тестами или командами в этом окружении (fake LLM / fake Telegram, но настоящий A2A по HTTP и настоящий Docker);
-- ✅ **env** — проверено вручную в этом окружении без credentials (Docker, сеть, живые RSS);
-- ⏳ **live** — требует ваших `ANTHROPIC_API_KEY` и Telegram-токена; шаги описаны в DEMO.md, в этом окружении **не выполнялось**.
+- 🧪 **fake** — pytest с fake LLM / **fake Gateway** / fake Telegram Bot API; A2A при этом настоящий, по HTTP. Интеграцию с OpenClaw не доказывает;
+- 🦞 **openclaw** — `scripts/openclaw_integration_check.py` против **настоящего OpenClaw 2026.9.9**, модель — контролируемый fake-провайдер (`compose.offline.yaml`). Реальную модель и Telegram не доказывает;
+- 🐳 **env** — ручная проверка в Docker без пользовательских credentials;
+- ⏳ **live** — требует ваших ключей, шаги в DEMO.md. В этом окружении **не выполнялось**.
 
-Дата проверки: 2026-10-11. Результат `pytest`: **35 passed** локально (Python 3.13 venv) и **35 passed** внутри Docker-образа.
+Дата проверки: 2026-10-11.
+- pytest: **44 passed** локально (Python 3.13) и **44 passed** в Docker-образе.
+- Интеграция с настоящим OpenClaw: **25/25 checks passed** (exit 0).
 
-| # | Критерий задания | Реализация | Как проверить | Статус |
+| # | Критерий | Реализация | Проверка | Статус |
 |---|---|---|---|---|
-| 1 | ≥ 2 LLM-агента с разными ролями и инструкциями | `editor/agent.py` (`SYSTEM_PROMPT`, `ROLE="editor"`), `researcher/agent.py` (`SYSTEM_PROMPT`, `ROLE="researcher"`) | `pytest tests/test_editor_flow.py tests/test_a2a_roundtrip.py` | ✅ offline (fake LLM); ⏳ live: DEMO шаг 2–3 |
-| 1a | Фактически разные права на tools, проверка при dispatch | `agents/runtime.py` (`ToolRegistry.dispatch`, `ToolPermissionError`), registries в обоих агентах | `pytest tests/test_permissions.py tests/test_editor_flow.py::test_editor_cannot_call_rss_tool` | ✅ offline |
-| 1b | Подключена модель (Anthropic SDK), ≥ 1 tool | `agents/llm.py` (`AnthropicBackend`), tools `fetch_rss`, `request_research` и др. | `docker compose exec app python -m ai_news_digest.cli smoke` | ⏳ live (нужен ключ). Вызовы SDK сверены с установленным `anthropic==1.13.0` |
-| 2 | Persistent memory после перезапуска и новой беседы | `editor/memory.py` (SQLite в volume `editor_memory`), `/new` → `ConversationStore.clear` | `pytest tests/test_memory.py tests/test_editor_flow.py::test_full_scenario_memory_digest_restart_and_skip_delivered`; live: DEMO шаги 1, 4–6 | ✅ offline; ⏳ live |
-| 2a | Доставленные URL помечаются только после успешной отправки, с учётом частичной доставки | `EditorService.deliver` | `pytest tests/test_editor_flow.py::test_partial_delivery_marks_only_sent_chunks` | ✅ offline |
-| 2b | Отдельный явный reset памяти | `cli.py reset-memory --yes` | `pytest tests/test_memory.py::test_reset_memory_cli` | ✅ offline |
-| 3 | Задача и результат через Telegram | `telegram_bot.py` (python-telegram-bot 22.8, long polling) | DEMO шаги 1–7 | ⏳ live. Offline: `tests/test_telegram.py::test_ptb_application_wiring_with_fake_bot_api` (настоящий PTB `Application` и хендлеры, фейковый Bot API) |
-| 3a | Allowlist проверяется до модели; без allowlist — понятная ошибка | `Gatekeeper`, `config.allowed_telegram_user_id` | `pytest tests/test_telegram.py`; в Docker: `app` без `ALLOWED_TELEGRAM_USER_ID` → `Configuration error: ALLOWED_TELEGRAM_USER_ID is not set…` | ✅ offline + ✅ env |
-| 4 | A2A через официальный SDK | `researcher/server.py` (`DefaultRequestHandler`, `create_agent_card_routes`, `create_jsonrpc_routes`, `TaskUpdater`), `editor/researcher_client.py` (`A2ACardResolver`, `create_client`, `SendMessageRequest`) — a2a-sdk 1.2.2, A2A 1.0, JSON-RPC | `pytest tests/test_a2a_roundtrip.py` (uvicorn + SDK-клиент, discovery, task id, `TASK_STATE_COMPLETED`/`FAILED`/`REJECTED`, валидация `ResearchResult`) | ✅ offline |
-| 4a | Agent Card discovery в сети Compose | `compose.yaml` (`RESEARCHER_PUBLIC_URL=http://researcher:9100`) | Выполнено: из контейнера `app` получен card `AI News Researcher 0.1.0 JSONRPC 1.0 http://researcher:9100 ['ai_news_research']`; `researcher` в статусе healthy | ✅ env |
-| 4b | Timeout, ограниченный retry, без выдуманных новостей при недоступности | `ResearcherClient` (2 попытки только для сетевых ошибок), `_researcher_error_text` | `pytest tests/test_a2a_roundtrip.py::test_researcher_unavailable_is_retried_then_reported tests/test_editor_flow.py::test_researcher_unavailable_gives_error_and_no_digest`; live: DEMO шаг 8 | ✅ offline; ⏳ live |
-| 4c | Ссылки дайджеста только из материалов Researcher; дайджест только после A2A | `_submit_digest` (проверка URL, gate «request_research first») | `pytest tests/test_editor_flow.py::test_hallucinated_link_is_rejected ::test_digest_requires_research` | ✅ offline |
-| 5 | Dashboard: runs, timeline, LLM/tool calls, A2A, статусы, ошибки, memory, отправка | `tracing.py`, `dashboard/app.py` | `pytest tests/test_dashboard.py` (Streamlit AppTest на трассах из offline-demo); в Docker: health 200, трассы из volume читаются, запись запрещена (read-only) | ✅ offline + ✅ env; ⏳ live: DEMO шаг 3 |
-| 5a | Секреты не попадают в трассы | `tracing.redact` | `pytest tests/test_permissions.py::test_trace_redacts_secrets` | ✅ offline |
-| 6 | Воспроизведение по README со своими credentials | `README.md`, `.env.example`, `compose.yaml`, `Dockerfile`, `Makefile` | `docker compose config` ✅; образ собирается ✅; `researcher` и `dashboard` поднимаются healthy с dummy-ключом ✅; полный live-прогон ⏳ | ✅ env; ⏳ live |
-| R | RSS: парсинг, окно времени UTC, записи без дат, canonical URL, дубли, лимиты, ошибки источника, фильтр AWS | `researcher/rss.py`, `config/sources.toml`, fixtures `tests/fixtures/*` | `pytest tests/test_rss.py`; живые ленты: вызов `fetch_feed_bytes/parse_feed/filter_entries` на 3 реальных URL (openai 1287→5, hf 876→1, aws 100→8 после фильтра) | ✅ offline + ✅ env |
-| A | Attribution к workshop | README, раздел-врезка в начале | — | ✅ |
+| 1 | Coordinator реально выполняется в OpenClaw: инструкции агента, модель, выбор tools | `openclaw/openclaw.template.json` (агент `editor`), `openclaw/workspace/editor/*`, `coordinator/openclaw_client.py`, `coordinator/service.py` | openclaw-check: «editor workspace AGENTS.md + SOUL.md in the system prompt», «model calls were made by OpenClaw» (24 запроса к провайдеру), hooks `llm_input/llm_call/run` | 🦞 ✅; ⏳ live (`smoke --agent-turn`, DEMO 1–3) |
+| 1a | Python не запускает скрытый LLM Editor | старый `editor/agent.py` удалён; `app` не получает `ANTHROPIC_API_KEY` | `tests/test_coordinator_flow.py::test_openclaw_unavailable_gives_error_without_fallback` (нет `llm_call` в app); openclaw-check «OpenClaw down → error, no hidden fallback» | 🧪 ✅ 🦞 ✅ |
+| 2 | Разные роли и права; ограничение нативных tools OpenClaw | `tools.profile=minimal`, `toolSearch=false`, `deny` всех групп; plugin `before_tool_call`; `coordinator/tools.py` (allowlist + схемы + состояние); Researcher `researcher/agent.py` | openclaw-check: «native OpenClaw tools after policy = []», «tools offered to the model are only the Coordinator allowlist», «runtime refused web_fetch»; `tests/test_permissions.py`, `test_forbidden_tool_is_denied_by_app` | 🦞 ✅ 🧪 ✅ |
+| 2a | Привязка tools к контексту запроса (trace, исследование) | `TurnState`, `ToolContext`; `extra="forbid"` | `test_unknown_arguments_and_foreign_trace_are_rejected` | 🧪 ✅ |
+| 3 | Digest только через `request_research` + валидированный `submit_digest`; свободный текст не считается результатом | `route_intent`, `tool_choice` (pinned/required), `_reply` (запрет в digest-потоке и ссылок), `NoStructuredAction` | `test_text_only_answer_is_not_a_digest`, `test_reply_cannot_replace_a_digest`, `test_hallucinated_link_is_rejected`, `test_empty_research_result_is_reported_honestly`; openclaw-check «text-only answer to a digest request is not a digest», «invented link rejected», «/digest pins request_research» | 🧪 ✅ 🦞 ✅ |
+| 4 | Настоящий A2A (official SDK) из tool Coordinator | `coordinator/researcher_client.py`, `researcher/server.py` (a2a-sdk 1.2.2, A2A 1.0, JSON-RPC) | `tests/test_a2a_roundtrip.py` (discovery, task_id, COMPLETED/FAILED/REJECTED, retry); openclaw-check «Coordinator's request_research produced a real A2A task» | 🧪 ✅ 🦞 ✅ |
+| 4a | Researcher недоступен → честная ошибка, нет новостей и доставки | `ResearcherUnavailable` → `_researcher_error_text`, закрытие tool loop | `test_researcher_unavailable_gives_error_and_no_digest`; openclaw-check «researcher down → honest error» | 🧪 ✅ 🦞 ✅; ⏳ live DEMO 9 |
+| 4b | OpenClaw недоступен → понятная ошибка и failed trace | `OpenClawUnavailable` | `test_openclaw_unavailable_gives_error_without_fallback`, `test_wrong_gateway_token_is_an_error`; openclaw-check; в Docker без ключа Gateway вернул `401 No API key found for provider "anthropic"` → ошибка пользователю | 🧪 ✅ 🦞 ✅ 🐳 ✅; ⏳ live DEMO 11 |
+| 5 | Persistent memory после restart и `/new`; `/new` = новая сессия OpenClaw | `coordinator/memory.py` (+`conversations`), `x-openclaw-session-key=digest-<id>` | `test_full_scenario_restart_new_and_skip_delivered`; openclaw-check «after restart + /new the agent reads limit 2 from SQLite», «/new rotated the OpenClaw session», «new session carries no earlier conversation» | 🧪 ✅ 🦞 ✅; ⏳ live DEMO 4–6 |
+| 5a | Совместимость с существующими данными | тот же volume `editor_memory` и путь; `CREATE TABLE IF NOT EXISTS` | `tests/test_memory.py::test_pre_migration_database_is_opened_without_data_loss` | 🧪 ✅ |
+| 5b | Tool follow-up не дублирует transcript | follow-up = только assistant tool-call + `role:"tool"`; закрытие `tool_choice:"none"` | openclaw-check «tool follow-ups do not duplicate a user request»; `test_full_scenario…` (follow-ups содержат только assistant/tool) | 🦞 ✅ 🧪 ✅ |
+| 6 | `/last` и «Покажи последний дайджест» — общий путь, полный дайджест, без `[:4096]`, корректный HTML, счётчики не меняются | `coordinator/delivery.py::resend_last_digest`, `coordinator/digest.py` | `tests/test_digest_render.py` (длинная статья, длинная ссылка, `& < >`, баланс тегов, оба пути, частичная доставка); `test_ptb_application_wiring_with_fake_bot_api` (`/last`); openclaw-check «natural 'show last digest' uses the common full re-send path» | 🧪 ✅ 🦞 ✅; ⏳ live DEMO 8 |
+| 6a | Частичная доставка не отмечает неотправленное | `deliver_digest` | `test_partial_delivery_marks_only_sent_chunks` | 🧪 ✅ |
+| 7 | Telegram: allowlist до runtime, `/digest`, `/new`, `/settings`, `/last` | `telegram_bot.py` | `tests/test_telegram.py` (Gateway не вызывается для постороннего; PTB-хендлеры на фейковом Bot API) | 🧪 ✅; ⏳ live |
+| 8 | Dashboard: роли и runtime, OpenClaw run/session id, вызовы модели и tools, A2A task_id, память, доставка, ошибки, общий trace | `dashboard/app.py`, `tracing.join_openclaw_events`, plugin `digest-telemetry` | openclaw-check «OpenClaw events joined to app traces» (146/146), «one trace holds app, OpenClaw editor and Researcher»; `tests/test_dashboard.py` (join на тестовых данных + AppTest) | 🦞 ✅ 🧪 ✅; ⏳ live DEMO 3 |
+| 9 | Изоляция state OpenClaw, секреты по сервисам, Gateway только внутри сети | `compose.yaml` (volumes `openclaw_*`, `expose` без `ports`, `environment` по сервисам), `openclaw/init.mjs` | 🐳: `docker compose config` OK; live-конфиг с `anthropic/claude-opus-5-5` принят Gateway; ключ берётся из env (невалидный ключ → `invalid x-api-key` от Anthropic); `~/.openclaw` не затрагивался | 🐳 ✅ |
+| 9a | `sources.toml` обновляется без пересборки | `./config:/app/config:ro` в `app` и `researcher` | README §RSS | ✅ (конфигурация) |
+| 10 | Документация, workshop mapping, Hermes | `README.md`, `DEMO.md`, этот файл; старое ТЗ помечено как частично заменённое | — | ✅ |
 
-## Что сделать для закрытия ⏳ live
+## Не проверено в этом окружении (нет credentials)
+1. Реальная модель через OpenClaw (`smoke --agent-turn`) и в Researcher (`model-check`).
+2. Telegram: получение сообщений и доставка (DEMO 1–12).
+3. Live-сценарий: лимит 2 → дайджест → dashboard → restart → `/new` → настройки → новые ссылки → длинный дайджест и повтор → остановка и восстановление Researcher и OpenClaw.
 
-1. Заполнить `.env` (README §3–4).
-2. Выполнить `docker compose up -d --build` и `docker compose exec app python -m ai_news_digest.cli smoke`.
-3. Пройти DEMO.md шаги 1–9 и заполнить колонку «Факт».
-4. Обновить статусы в этой таблице.
+После live-прогона заполните колонку «Факт» в DEMO.md и поменяйте ⏳ на ✅ здесь.

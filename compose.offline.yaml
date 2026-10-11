@@ -1,0 +1,64 @@
+# OFFLINE integration check with the REAL OpenClaw Gateway and a controlled fake model provider.
+# Always use a separate project name so live volumes (memory, sessions, traces) are untouched:
+#
+#   docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml up -d --build \
+#       openclaw researcher fake-llm dashboard
+#   docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml run --rm --no-deps \
+#       app python scripts/openclaw_integration_check.py
+#   docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml down -v
+#
+# Proves: OpenClaw loads the editor workspace, applies the tool policy, runs hooks, keeps sessions,
+# and drives the app's tools and the real A2A exchange. Does NOT prove the real model or Telegram.
+
+services:
+  fake-llm:
+    build: .
+    image: ai-news-digest:local
+    user: "0:0"   # writes its request log into a fresh named volume
+    command: ["uvicorn", "ai_news_digest.testing.fake_provider_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      FAKE_LLM_LOG: /data/fake-llm/requests.jsonl
+      FAKE_FEEDS_DIR: /app/tests/fixtures
+    volumes:
+      - fake_llm_log:/data/fake-llm
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models', timeout=3)"]
+      interval: 5s
+      retries: 10
+
+  openclaw-init:
+    environment:
+      OPENCLAW_EDITOR_MODEL: fake/scripted-coordinator
+      OFFLINE_FAKE_LLM_URL: http://fake-llm:8000/v1
+
+  openclaw:
+    depends_on:
+      fake-llm:
+        condition: service_healthy
+    environment:
+      ANTHROPIC_API_KEY: ""
+
+  researcher:
+    depends_on:
+      fake-llm:
+        condition: service_healthy
+    environment:
+      ANTHROPIC_API_KEY: ""
+      RESEARCHER_LLM: fake
+      RESEARCHER_FIXED_NOW: "2026-10-10T12:00:00+00:00"
+      SOURCES_FILE: /app/tests/fixtures/sources.offline.toml
+
+  app:
+    environment:
+      TELEGRAM_BOT_TOKEN: ""
+      EDITOR_DB_PATH: /data/editor/offline-memory.sqlite3
+      SOURCES_FILE: /app/tests/fixtures/sources.offline.toml
+    volumes:
+      - fake_llm_log:/data/fake-llm:ro
+      - openclaw_traces:/traces/openclaw:ro
+      - researcher_traces:/traces/researcher:ro
+
+volumes:
+  fake_llm_log:

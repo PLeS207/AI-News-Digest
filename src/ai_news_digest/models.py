@@ -57,7 +57,7 @@ class Article(BaseModel):
 
     source_id: str
     title: str = Field(min_length=1, max_length=400)
-    url: str = Field(pattern=r"^https?://")
+    url: str = Field(pattern=r"^https?://", max_length=2048)
     published_at: datetime
     available_excerpt: str = Field(default="", max_length=1000)
     excerpt_is_empty: bool = False
@@ -140,8 +140,8 @@ class DigestItem(BaseModel):
 
     source_id: str
     source_name: str
-    title: str
-    url: str
+    title: str = Field(max_length=400)
+    url: str = Field(pattern=r"^https?://", max_length=2048)
     published_at: datetime
     summary: str = Field(min_length=1, max_length=900)
     application: str = Field(min_length=1, max_length=500)

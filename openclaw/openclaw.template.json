@@ -1,0 +1,60 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": { "source": "env", "provider": "default", "id": "OPENCLAW_GATEWAY_TOKEN" }
+    },
+    "tailscale": { "mode": "off" },
+    "terminal": { "enabled": false },
+    "cliAgents": { "enabled": false },
+    "http": { "endpoints": { "chatCompletions": { "enabled": true } } }
+  },
+  "agents": {
+    "defaults": {
+      "skipBootstrap": true,
+      "skills": [],
+      "heartbeat": { "every": "0m" }
+    },
+    "entries": {
+      "editor": {
+        "name": "Editor / Coordinator",
+        "workspace": "/workspace/editor",
+        "model": { "primary": "__MODEL__", "fallbacks": [] },
+        "thinkingDefault": "__THINKING__",
+        "identity": { "name": "Editor", "emoji": "🗞️" },
+        "skills": [],
+        "subagents": { "allowAgents": [] }
+      }
+    }
+  },
+  "tools": {
+    "profile": "minimal",
+    "toolSearch": false,
+    "deny": [
+      "group:openclaw", "group:runtime", "group:fs", "group:web", "group:ui", "group:messaging",
+      "group:nodes", "group:automation", "group:sessions", "group:memory", "group:agents",
+      "group:media", "group:plugins", "session_status", "gateway"
+    ],
+    "elevated": { "enabled": false }
+  },
+  "plugins": {
+    "load": { "paths": ["/opt/digest/plugins/digest-telemetry"] },
+    "entries": {
+      "digest-telemetry": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true, "allowPromptInjection": false },
+        "config": {
+          "traceFile": "/traces/openclaw/events.jsonl",
+          "allowedTools": [
+            "get_user_settings", "update_user_settings", "get_digest_history", "show_last_digest",
+            "request_research", "submit_digest", "reply"
+          ],
+          "workspaceMarker": "<!-- ai-news-digest:editor-workspace v1 -->"
+        }
+      }
+    }
+  }
+}

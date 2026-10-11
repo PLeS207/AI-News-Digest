@@ -1,6 +1,7 @@
-"""Editor persistent memory in SQLite: settings, digest history, delivered URLs.
+"""Application persistent memory in SQLite: settings, digest history, delivered URLs, conversations.
 
-Only the Editor process opens this database. A single allowed Telegram user is served, so the
+Only the `app` process opens this database (the OpenClaw Coordinator reads/writes it exclusively
+through backend tools; the Researcher never sees it). A single allowed Telegram user is served, so the
 settings row uses a fixed key ("owner") and no Telegram identifiers are stored.
 """
 
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +36,12 @@ CREATE TABLE IF NOT EXISTS digests (
     status TEXT NOT NULL,
     rendered_text TEXT NOT NULL,
     data TEXT NOT NULL
+);
+-- added in the OpenClaw migration; CREATE IF NOT EXISTS keeps existing databases compatible
+CREATE TABLE IF NOT EXISTS conversations (
+    chat_key TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS delivered_urls (
     url TEXT PRIMARY KEY,
@@ -93,6 +101,23 @@ class MemoryStore:
             )
         return settings
 
+    # ---- conversations (short-term OpenClaw session per chat; /new rotates it) ---------------
+    def current_conversation(self, chat_key: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute("SELECT conversation_id FROM conversations WHERE chat_key = ?", (chat_key,)).fetchone()
+        return row["conversation_id"] if row else self.new_conversation(chat_key)
+
+    def new_conversation(self, chat_key: str) -> str:
+        conversation_id = uuid.uuid4().hex[:16]
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO conversations(chat_key, conversation_id, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(chat_key) DO UPDATE SET conversation_id = excluded.conversation_id, "
+                "created_at = excluded.created_at",
+                (chat_key, conversation_id, _now()),
+            )
+        return conversation_id
+
     # ---- digests --------------------------------------------------------------------------
     def create_digest(self, digest: Digest, rendered_text: str) -> int:
         with self._connect() as conn:
@@ -119,6 +144,17 @@ class MemoryStore:
     def finish_digest(self, digest_id: int, status: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE digests SET status = ? WHERE id = ?", (status, digest_id))
+
+    def last_digest(self) -> tuple[int, Digest] | None:
+        """Most recent digest that reached the user (fully or partially), as a typed object."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, data FROM digests WHERE status IN ('delivered', 'partial', 'empty') "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row["id"]), Digest.model_validate_json(row["data"])
 
     def last_digests(self, limit: int = 3) -> list[dict[str, Any]]:
         with self._connect() as conn:

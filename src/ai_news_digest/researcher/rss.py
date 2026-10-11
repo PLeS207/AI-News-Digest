@@ -119,6 +119,8 @@ def parse_feed(source: SourceConfig, content: bytes, limits: Limits) -> list[Fee
             url = canonical_url(link)
         except ValueError:
             continue
+        if len(url) > 2048:
+            continue
         summary = raw.get("summary") or ""
         if not summary and raw.get("content"):
             summary = raw["content"][0].get("value", "")

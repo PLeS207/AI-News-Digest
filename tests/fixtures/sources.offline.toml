@@ -1,0 +1,17 @@
+# OFFLINE integration check only (compose.offline.yaml): fixture feeds served over HTTP by the
+# fake-llm service. The live configuration uses config/sources.toml.
+[[sources]]
+id = "openai_news"
+name = "OpenAI News"
+url = "http://fake-llm:8000/feeds/openai_news.xml"
+
+[[sources]]
+id = "huggingface_blog"
+name = "Hugging Face Blog"
+url = "http://fake-llm:8000/feeds/huggingface_blog.xml"
+
+[[sources]]
+id = "aws_whats_new"
+name = "AWS What's New"
+url = "http://fake-llm:8000/feeds/aws_whats_new.xml"
+interest_filter = true

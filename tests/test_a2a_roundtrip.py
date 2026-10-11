@@ -15,7 +15,7 @@ import pytest
 import uvicorn
 
 from ai_news_digest.agents.llm import ScriptedBackend
-from ai_news_digest.editor.researcher_client import ResearcherClient, ResearcherUnavailable
+from ai_news_digest.coordinator.researcher_client import ResearcherClient, ResearcherUnavailable
 from ai_news_digest.models import ResearchRequest
 from ai_news_digest.researcher.agent import Researcher
 from ai_news_digest.researcher.server import build_app
@@ -80,12 +80,12 @@ async def test_real_a2a_round_trip(sources, limits, researcher_llm, feed_http, t
     assert all(a.relevance_reason for a in result.articles)
     assert result.incomplete is False
 
-    editor_events = read_events([tracer.path])
+    app_events = read_events([tracer.path])
     researcher_events = read_events([researcher_tracer.path])
-    kinds = {(e["kind"], e["status"]) for e in editor_events}
+    kinds = {(e["kind"], e["status"]) for e in app_events}
     assert ("a2a_discovery", "completed") in kinds and ("a2a_send", "completed") in kinds
     assert ("a2a_result", "completed") in kinds
-    send = next(e for e in editor_events if e["kind"] == "a2a_send" and e["status"] == "completed")
+    send = next(e for e in app_events if e["kind"] == "a2a_send" and e["status"] == "completed")
     assert send["data"]["task_id"] == task_id and send["data"]["task_state"] == "TASK_STATE_COMPLETED"
     # both processes trace under the same trace_id, including the researcher's LLM and RSS tool calls
     assert {e["trace_id"] for e in researcher_events} == {request.trace_id}
@@ -116,9 +116,9 @@ async def test_failed_researcher_task_is_not_retried(sources, limits, feed_http,
         client = ResearcherClient(url, tracer, timeout_seconds=30, max_attempts=2, backoff_seconds=0.01)
         with pytest.raises(ResearcherUnavailable, match="TASK_STATE_FAILED"):
             await client.research(_request(trace_id="tr-fail-0001"))
-    editor_events = read_events([tracer.path])
-    assert not [e for e in editor_events if e["kind"] == "a2a_retry"]
-    task_status = next(e for e in editor_events if e["kind"] == "a2a_task")
+    app_events = read_events([tracer.path])
+    assert not [e for e in app_events if e["kind"] == "a2a_retry"]
+    task_status = next(e for e in app_events if e["kind"] == "a2a_task")
     assert task_status["status"] == "failed" and task_status["data"]["task_state"] == "TASK_STATE_FAILED"
     assert any(e["kind"] == "run" and e["status"] == "failed" for e in read_events([researcher_tracer.path]))
 

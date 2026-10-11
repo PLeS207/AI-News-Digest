@@ -61,8 +61,9 @@ def new_id(prefix: str = "") -> str:
 
 
 class Tracer:
-    def __init__(self, service: str, base_dir: str | Path):
+    def __init__(self, service: str, base_dir: str | Path, runtime: str = "python"):
         self.service = service
+        self.runtime = runtime
         self.path = Path(base_dir) / service / "events.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -88,6 +89,7 @@ class Tracer:
             "span_id": span_id or new_id(),
             "service": self.service,
             "agent": agent,
+            "runtime": self.runtime,
             "kind": kind,
             "name": name,
             "status": status,
@@ -175,4 +177,52 @@ def read_events(paths: list[Path]) -> list[dict[str, Any]]:
                 except json.JSONDecodeError:
                     continue
     events.sort(key=lambda e: e.get("ts", ""))
+    return events
+
+
+def join_openclaw_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach OpenClaw hook events (written by the digest-telemetry plugin without a trace id) to the
+    app trace that issued the Gateway call.
+
+    1. ``run_id``: the app records the response ``id`` of every /v1/chat/completions call and OpenClaw
+       hooks report the same value as ``runId``;
+    2. ``session_window`` (fallback, e.g. a Gateway 502 has no response id): the hook's session key
+       ``agent:<agent>:<key>`` equals the app turn's ``openclaw_session_key`` and the event happened
+       inside that turn's run span (turns of one chat are processed sequentially).
+    The method used is stored in ``data.joined_by``."""
+    run_to_trace: dict[str, str] = {}
+    windows: list[tuple[str, str, str, str]] = []  # (session_key, start_ts, end_ts, trace_id)
+    starts: dict[str, dict[str, Any]] = {}
+    for e in events:
+        data = e.get("data") or {}
+        if e.get("service") == "openclaw":
+            continue
+        if data.get("openclaw_run_id") and e.get("trace_id"):
+            run_to_trace[data["openclaw_run_id"]] = e["trace_id"]
+        if e.get("kind") == "run" and data.get("openclaw_session_key"):
+            if e.get("status") == "started":
+                starts[e["span_id"]] = e
+            elif e["span_id"] in starts:
+                windows.append((data["openclaw_session_key"], starts[e["span_id"]]["ts"], e["ts"], e["trace_id"]))
+
+    def _norm(ts: str) -> str:
+        return ts.replace("+00:00", "Z")
+
+    for e in events:
+        if e.get("service") != "openclaw":
+            e.setdefault("runtime", "python")
+            continue
+        e.setdefault("runtime", "openclaw")
+        data = e.setdefault("data", {})
+        run_id = data.get("openclaw_run_id")
+        if run_id in run_to_trace:
+            e["trace_id"], data["joined_by"] = run_to_trace[run_id], "run_id"
+            continue
+        session = str(data.get("openclaw_session_key") or "")
+        match = next((trace for key, start, end, trace in windows
+                      if session.endswith(f":{key}") and _norm(start) <= _norm(e["ts"]) <= _norm(end)), None)
+        if match:
+            e["trace_id"], data["joined_by"] = match, "session_window"
+        else:
+            e["trace_id"] = f"openclaw-unlinked:{run_id}"
     return events

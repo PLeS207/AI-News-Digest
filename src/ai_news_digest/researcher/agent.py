@@ -221,17 +221,18 @@ def task_prompt(req: ResearchRequest, ctx: ResearchContext) -> str:
 
 class Researcher:
     def __init__(self, *, llm: LLMBackend, sources: list[SourceConfig], limits: Limits, tracer: Tracer,
-                 http_client: httpx.AsyncClient | None = None):
+                 http_client: httpx.AsyncClient | None = None, fixed_now: datetime | None = None):
         self.llm = llm
         self.sources = {s.id: s for s in sources}
         self.limits = limits
         self.tracer = tracer
         self.http_client = http_client
+        self.fixed_now = fixed_now  # offline integration check only
         self.spec = AgentSpec(role=ROLE, system_prompt=SYSTEM_PROMPT, registry=build_registry(),
                               max_iterations=limits.max_llm_iterations, max_tool_calls=limits.max_tool_calls)
 
     async def research(self, request: ResearchRequest) -> ResearchResult:
-        now = request.now or datetime.now(timezone.utc)
+        now = request.now or self.fixed_now or datetime.now(timezone.utc)
         own_client = self.http_client is None
         http = self.http_client or httpx.AsyncClient()
         try:
