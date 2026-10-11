@@ -72,7 +72,7 @@ async def deliver_digest(digest: Digest, *, send: SendFn, memory: MemoryStore, t
 
 
 async def resend_last_digest(*, send: SendFn, memory: MemoryStore, tracer: Tracer, trace_id: str,
-                             empty_text: str = "Дайджестов пока нет.") -> dict[str, Any]:
+                             empty_text: str = "There is no saved digest yet.") -> dict[str, Any]:
     last = memory.last_digest()
     tracer.event(trace_id, agent=AGENT, kind="memory_read", name="last_digest", status="completed",
                  output=f"found={last is not None}", data={"digest_id": last[0] if last else None})

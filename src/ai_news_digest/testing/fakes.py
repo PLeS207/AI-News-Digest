@@ -1,6 +1,7 @@
 """Deterministic fakes for OFFLINE checks. Never used in the normal (live) configuration.
 
-* ``researcher_script`` - fake Researcher LLM (fetch every source, select every item);
+* ``decide_research`` - scripted Researcher policy (fetch every source, select every item);
+* ``ScriptedGateway`` - a Gateway transport returning given assistant messages (edge cases);
 * ``decide`` - scripted Coordinator policy shared by:
   - ``FakeGateway``: an httpx transport imitating the OpenClaw Gateway (client-level tests only;
     it does NOT prove the OpenClaw integration);
@@ -20,36 +21,24 @@ from typing import Any
 
 import httpx
 
-from ai_news_digest.agents.llm import fake_response, tool_use
 
 TERMINAL = {"submit_digest", "reply", "show_last_digest"}
 FORBIDDEN_NATIVE_TOOL = "web_fetch"
 
 
 # ---------------------------------------------------------------- researcher ----------------------
-def _tool_results_anthropic(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = []
-    for m in messages:
-        if m["role"] == "user" and isinstance(m["content"], list):
-            for block in m["content"]:
-                if block.get("type") == "tool_result" and not block.get("is_error"):
-                    out.append(json.loads(block["content"]))
-    return out
-
-
-def researcher_script(system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]):
-    """Fake Researcher LLM: fetch every listed source, then select every returned item."""
-    results = _tool_results_anthropic(messages)
-    if not results:
-        ids = re.findall(r"^- ([a-z0-9_]+):", messages[0]["content"], flags=re.M)
-        return fake_response({"type": "text", "text": "Fetching sources."},
-                             *[tool_use("fetch_rss", {"source_id": sid}) for sid in ids])
-    max_sel = int(re.search(r"Select at most (\d+)", messages[0]["content"]).group(1))
-    items = [i for r in results for i in r.get("items", [])][:max_sel]
-    return fake_response(tool_use("submit_selection", {
-        "selected": [{"item_id": i["item_id"], "relevance_reason": f"matches interests: {i['title'][:40]}"}
-                     for i in items],
-    }))
+def decide_research(task_text: str, results: list[tuple[str, str]]) -> dict[str, Any]:
+    """Scripted Researcher for the OpenClaw `researcher` agent: fetch every source, select every item."""
+    if any(name == "submit_selection" and not str(c).startswith("ERROR") for name, c in results):
+        return {"text": "Selection submitted."}
+    fetched = [_parse(c) for name, c in results if name == "fetch_rss"]
+    if not fetched:
+        ids = re.findall(r"^- ([a-z0-9_]+):", task_text, flags=re.M)
+        return {"tool_calls": [("fetch_rss", {"source_id": sid}) for sid in ids]}
+    match = re.search(r"Select at most (\d+)", task_text)
+    items = [i for r in fetched if isinstance(r, dict) for i in r.get("items", [])][: int(match.group(1)) if match else 10]
+    return {"tool_calls": [("submit_selection", {"selected": [
+        {"item_id": i["item_id"], "relevance_reason": f"matches interests: {i['title'][:40]}"} for i in items]})]}
 
 
 # ---------------------------------------------------------------- coordinator policy ---------------
@@ -60,11 +49,17 @@ def _parse(content: str) -> Any:
         return content
 
 
+def _has(t: str, *words: str) -> bool:
+    return any(w in t for w in words)
+
+
 def decide(user_text: str, results: list[tuple[str, str]]) -> dict[str, Any]:
-    """Scripted Coordinator: returns {"tool_calls": [(name, args)]} or {"text": "..."}."""
+    """Scripted Coordinator: returns {"tool_calls": [(name, args)]} or {"text": "..."}.
+
+    Understands English and Russian requests (the real agent is multilingual too)."""
     t = user_text.lower()
     if any(name in TERMINAL and not str(content).startswith("ERROR") for name, content in results):
-        return {"text": "Готово."}  # closing turn after a terminal action
+        return {"text": "Done."}  # closing turn after a terminal action
     done = {name for name, _ in results}
     last_of = {name: _parse(content) for name, content in results}
     errors = [c for _, c in results if str(c).startswith("ERROR") or "not found" in str(c)]
@@ -72,41 +67,42 @@ def decide(user_text: str, results: list[tuple[str, str]]) -> dict[str, Any]:
     def call(name: str, args: dict[str, Any]) -> dict[str, Any]:
         return {"tool_calls": [(name, args)]}
 
-    if "только текст" in t:
-        return {"text": "Вот новости без исследования: всё отлично."}
-    if "запрещ" in t:
+    if _has(t, "text only", "только текст"):
+        return {"text": "Here is the news without research: all is well."}
+    if _has(t, "forbidden", "запрещ"):
         if FORBIDDEN_NATIVE_TOOL not in done:
             return call(FORBIDDEN_NATIVE_TOOL, {"url": "https://example.com/feed"})
-        return call("reply", {"text": "У меня нет доступа к этому инструменту.", "kind": "info"})
-    if "запомни" in t:
+        return call("reply", {"text": "I do not have access to that tool.", "kind": "info"})
+    if _has(t, "remember", "запомни"):
         if "update_user_settings" not in done:
+            limit = int(m.group(1)) if (m := re.search(r"(\d+)", t)) else 2
             return call("update_user_settings", {"interests": ["AI agents", "MCP", "AWS Bedrock"],
-                                                 "language": "ru", "max_items": 2})
-        return call("reply", {"text": "Запомнил: максимум 2 новости.", "kind": "confirmation"})
-    if "настройки" in t:
+                                                 "language": "en", "max_items": limit})
+        return call("reply", {"text": "Saved: up to that many news items.", "kind": "confirmation"})
+    if _has(t, "settings", "настройки"):
         settings = last_of.get("get_user_settings")
         if not isinstance(settings, dict):
             return call("get_user_settings", {})
-        return call("reply", {"text": f"Лимит: {settings['max_items']}, интересы: {', '.join(settings['interests'])}",
+        return call("reply", {"text": f"Limit: {settings['max_items']}, interests: {', '.join(settings['interests'])}",
                               "kind": "settings"})
-    if "последний" in t:
+    if _has(t, "last digest", "последний"):
         return call("show_last_digest", {})
-    if "дайджест" in t or "digest" in t:
-        if "ответь текстом" in t and not errors:
-            return call("reply", {"text": "Дайджест: всё спокойно.", "kind": "info"})
+    if _has(t, "digest", "дайджест"):
+        if _has(t, "answer in text", "ответь текстом") and not errors:
+            return call("reply", {"text": "Digest: nothing to report.", "kind": "info"})
         research = last_of.get("request_research")
         if research is None:
             return call("request_research", {})
         if not isinstance(research, dict) or "error" in research:
-            return {"text": "Researcher недоступен."}
-        if "выдумай" in t and not errors:
+            return {"text": "The Researcher is unavailable."}
+        if _has(t, "invent", "выдумай") and not errors:
             return call("submit_digest", {"items": [{"url": "https://example.com/made-up", "summary": "x",
                                                       "application": "y"}]})
-        items = [{"url": a["url"], "summary": f"Кратко: {a['title']}. Основано на RSS-анонсе.",
-                  "application": "Можно оценить для платформенной команды."}
+        items = [{"url": a["url"], "summary": f"In short: {a['title']}. Based on the RSS announcement.",
+                  "application": "Worth evaluating for the platform team."}
                  for a in research["articles"][: research["max_items"]]]
-        return call("submit_digest", {"intro": "Свежие новости", "items": items})
-    return call("reply", {"text": "Готов помочь с дайджестом.", "kind": "help"})
+        return call("submit_digest", {"intro": "Fresh news", "items": items})
+    return call("reply", {"text": "Ready to help with your digest.", "kind": "help"})
 
 
 # ---------------------------------------------------------------- fake gateway (client tests) ------
@@ -134,15 +130,18 @@ class FakeGateway:
             return httpx.Response(self.fail_status, json={"error": {"type": "api_error", "message": "agent run failed"}})
         body = json.loads(request.content)
         session_key = request.headers.get("x-openclaw-session-key", "")
+        if not session_key.startswith(f"agent:{self.agent_id}:"):  # real Gateway with several agents: HTTP 500
+            return httpx.Response(500, json={"error": {"type": "api_error", "message": "internal error"}})
         self.requests.append({"session_key": session_key, "body": body})
         assert body["model"] == f"openclaw/{self.agent_id}"
+        researcher = self.agent_id == "researcher"
         session = self.sessions.setdefault(session_key, {"user_text": "", "results": [], "turns": 0})
         msgs = body["messages"]
         id_to_name: dict[str, str] = {}
         for m in msgs:
             if m["role"] == "user":
                 text = m["content"]
-                match = re.search(r"<user_message>(.*)</user_message>", text, re.S)
+                match = None if researcher else re.search(r"<user_message>(.*)</user_message>", text, re.S)
                 session.update(user_text=match.group(1) if match else text, results=[])
                 session["turns"] += 1
             elif m["role"] == "assistant":
@@ -150,7 +149,7 @@ class FakeGateway:
                     id_to_name[c["id"]] = c["function"]["name"]
             elif m["role"] == "tool":
                 session["results"].append((id_to_name.get(m["tool_call_id"], "?"), m["content"]))
-        decision = decide(session["user_text"], session["results"])
+        decision = (decide_research if researcher else decide)(session["user_text"], session["results"])
         tool_choice = body.get("tool_choice", "auto")
         run_id = f"chatcmpl_{uuid.uuid4()}"
         pinned = tool_choice.get("function", {}).get("name") if isinstance(tool_choice, dict) else None
@@ -183,7 +182,7 @@ def _text_of(content: Any) -> str:
     return ""
 
 
-def parse_openclaw_prompt(messages: list[dict[str, Any]]) -> tuple[str, list[tuple[str, str]]]:
+def parse_openclaw_prompt(messages: list[dict[str, Any]], marker: str = "<user_message>") -> tuple[str, list[tuple[str, str]]]:
     """Recover (user request, tool results of the current turn) from the provider request OpenClaw sends.
 
     OpenClaw folds client-tool follow-ups into a user message:
@@ -192,11 +191,11 @@ def parse_openclaw_prompt(messages: list[dict[str, Any]]) -> tuple[str, list[tup
     """
     start = 0
     for i, m in enumerate(messages):
-        if m.get("role") == "user" and "<user_message>" in _text_of(m.get("content")):
+        if m.get("role") == "user" and marker in _text_of(m.get("content")):
             start = i
     turn = messages[start:]
     first = _text_of(turn[0].get("content")) if turn else ""
-    match = re.search(r"<user_message>(.*?)</user_message>", first, re.S)
+    match = re.search(r"<user_message>(.*?)</user_message>", first, re.S) if marker == "<user_message>" else None
     user_text = match.group(1) if match else first
     names: dict[str, str] = {}
     results: list[tuple[str, str]] = []
@@ -230,8 +229,12 @@ def fake_provider_app(log_path: str | Path, feeds_dir: str | Path):
         body = await request.json()
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": time.time(), "body": body}, ensure_ascii=False) + "\n")
-        user_text, results = parse_openclaw_prompt(body.get("messages", []))
-        decision = decide(user_text, results)
+        if "researcher" in str(body.get("model")):  # OpenClaw `researcher` agent -> fake/scripted-researcher
+            task_text, results = parse_openclaw_prompt(body.get("messages", []), marker="Research task")
+            decision = decide_research(task_text, results)
+        else:
+            user_text, results = parse_openclaw_prompt(body.get("messages", []))
+            decision = decide(user_text, results)
         offered = {t["function"]["name"] for t in body.get("tools", []) if "function" in t}
         cid = f"fake-{uuid.uuid4().hex[:8]}"
         if "tool_calls" in decision:
@@ -268,7 +271,8 @@ def fake_provider_app(log_path: str | Path, feeds_dir: str | Path):
         return StreamingResponse(sse(), media_type="text/event-stream")
 
     async def models(request):
-        return JSONResponse({"object": "list", "data": [{"id": "scripted-coordinator", "object": "model"}]})
+        return JSONResponse({"object": "list", "data": [{"id": "scripted-coordinator", "object": "model"},
+                                                        {"id": "scripted-researcher", "object": "model"}]})
 
     async def feed(request):
         name = request.path_params["name"]
@@ -281,3 +285,26 @@ def fake_provider_app(log_path: str | Path, feeds_dir: str | Path):
 
     return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"]), Route("/v1/models", models),
                              Route("/feeds/{name}", feed)])
+
+
+# ---------------------------------------------------------------- scripted gateway (edge cases) -----
+class ScriptedGateway(httpx.AsyncBaseTransport):
+    """Returns the given assistant messages in order; a non-200 ``status`` fails every call."""
+
+    def __init__(self, *messages: dict[str, Any], status: int = 200, error: str = "usage limit reached"):
+        self.messages, self.status, self.error, self.bodies = list(messages), status, error, []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.bodies.append(json.loads(request.content))
+        if self.status != 200:
+            return httpx.Response(self.status, json={"error": {"type": "api_error", "message": self.error}})
+        message = self.messages.pop(0) if self.messages else {"role": "assistant", "content": "done"}
+        finish = "tool_calls" if message.get("tool_calls") else "stop"
+        return httpx.Response(200, json={"id": f"chatcmpl_{len(self.bodies)}", "choices": [
+            {"index": 0, "message": message, "finish_reason": finish}], "usage": {"total_tokens": 7}})
+
+
+def gateway_tool_call(name: str, args: Any) -> dict[str, Any]:
+    """An assistant message requesting one client tool call (``args`` may be raw, even invalid, JSON)."""
+    return {"role": "assistant", "content": "", "tool_calls": [{"id": f"c_{name}", "type": "function", "function": {
+        "name": name, "arguments": args if isinstance(args, str) else json.dumps(args)}}]}

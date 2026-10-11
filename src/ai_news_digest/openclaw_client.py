@@ -1,8 +1,9 @@
 """Client for the OpenClaw Gateway OpenAI-compatible endpoint (POST /v1/chat/completions).
 
 Contract (OpenClaw 2026.9.9, docs/gateway/openai-http-api.md):
-* ``model: "openclaw/<agentId>"`` selects the configured agent (here: ``editor``);
-* ``x-openclaw-session-key`` routes the run into an application-owned session;
+* ``model: "openclaw/<agentId>"`` selects the configured agent (``editor`` = Coordinator, ``researcher`` = Researcher);
+* ``x-openclaw-session-key`` routes the run into an application-owned session; with more than one
+  agent configured the key must be agent-scoped, so the client sends ``agent:<agentId>:<key>``;
 * client function ``tools`` + ``tool_choice``; the agent answers with ``finish_reason="tool_calls"``
   and the client continues the same loop with the assistant tool-call message plus ``role:"tool"``
   results (only the new messages: the session already holds the earlier transcript);
@@ -72,7 +73,7 @@ class OpenClawClient:
         try:
             async with self._client() as http:
                 response = await http.post(f"{self.base_url}/v1/chat/completions", json=body,
-                                           headers={"x-openclaw-session-key": session_key})
+                                           headers={"x-openclaw-session-key": self.scoped_session_key(session_key)})
         except httpx.TimeoutException as exc:
             raise OpenClawUnavailable("OpenClaw Gateway timed out") from exc
         except httpx.HTTPError as exc:
@@ -94,6 +95,9 @@ class OpenClawClient:
         return GatewayResponse(run_id=data.get("id", ""), content=message.get("content") or "",
                                finish_reason=choice.get("finish_reason") or "", tool_calls=calls,
                                usage=data.get("usage") or {}, raw_message=message)
+
+    def scoped_session_key(self, key: str) -> str:
+        return key if key.startswith("agent:") else f"agent:{self.agent_id}:{key}"
 
     async def health(self) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=5.0, transport=self.transport) as http:

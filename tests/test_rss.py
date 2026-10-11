@@ -113,9 +113,9 @@ async def test_http_errors_become_feed_errors(feed_http, limits):
 
 
 async def test_researcher_reports_source_error_and_partial_result(
-        feed_http, limits, researcher_llm, researcher_tracer, sources):
+        feed_http, limits, researcher_openclaw, researcher_tracer, sources):
     sources = sources[:2] + [SourceConfig(id="broken", name="Broken", url="https://feeds.test/broken.xml")]
-    researcher = Researcher(llm=researcher_llm, sources=sources, limits=limits, tracer=researcher_tracer,
+    researcher = Researcher(openclaw=researcher_openclaw, sources=sources, limits=limits, tracer=researcher_tracer,
                             http_client=feed_http)
     req = ResearchRequest(request_id="req-00000001", trace_id="tr-00000001", period_hours=72,
                           interests=["MCP"], max_items=5, now=NOW)
@@ -132,21 +132,16 @@ async def test_researcher_reports_source_error_and_partial_result(
 
 
 async def test_rss_tool_rejects_unknown_source(feed_http, limits, researcher_tracer, sources):
-    from ai_news_digest.agents.llm import ScriptedBackend, fake_response, tool_use
+    from ai_news_digest.testing.fakes import ScriptedGateway, gateway_tool_call
+    from conftest import researcher_client
 
-    calls = []
-
-    def script(system, messages, tools):
-        calls.append(list(messages))
-        if len(calls) == 1:
-            return fake_response(tool_use("fetch_rss", {"source_id": "https://evil.example/feed"}))
-        return fake_response(tool_use("submit_selection", {"selected": []}))
-
-    researcher = Researcher(llm=ScriptedBackend(script), sources=sources, limits=limits,
+    gateway = ScriptedGateway(gateway_tool_call("fetch_rss", {"source_id": "https://evil.example/feed"}),
+                              gateway_tool_call("submit_selection", {"selected": []}))
+    researcher = Researcher(openclaw=researcher_client(gateway), sources=sources, limits=limits,
                             tracer=researcher_tracer, http_client=feed_http)
     req = ResearchRequest(request_id="req-00000002", trace_id="tr-00000002", period_hours=72,
                           interests=["MCP"], max_items=3, now=NOW)
     result = await researcher.research(req)
-    error_block = calls[1][-1]["content"][0]
-    assert error_block["is_error"] and "unknown source_id" in error_block["content"]
+    tool_result = next(m for m in gateway.bodies[1]["messages"] if m["role"] == "tool")
+    assert tool_result["content"].startswith("ERROR:") and "unknown source_id" in tool_result["content"]
     assert result.articles == [] and result.incomplete  # nothing fetched -> flagged incomplete

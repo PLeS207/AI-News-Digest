@@ -1,10 +1,11 @@
 """Operational commands.
 
     python -m ai_news_digest.cli check-config       # app container: env/config sanity (values hidden)
-    python -m ai_news_digest.cli smoke              # app container: OpenClaw Gateway + editor agent,
-                                                    #   Researcher Agent Card, Telegram getMe (no LLM tokens)
-    python -m ai_news_digest.cli smoke --agent-turn # + one real OpenClaw Coordinator turn (spends tokens)
-    python -m ai_news_digest.cli model-check        # researcher container: Anthropic model availability
+    python -m ai_news_digest.cli smoke              # app container: OpenClaw Gateway + editor/researcher agents,
+                                                    #   Researcher Agent Card, Telegram getMe (no model calls)
+    python -m ai_news_digest.cli smoke --agent-turn # + one real OpenClaw Coordinator turn with a tool call
+    python -m ai_news_digest.cli model-check        # researcher container: one real model call of the
+                                                    #   Researcher's runtime that must return a tool call
     python -m ai_news_digest.cli research           # app container: one A2A task to the Researcher
     python -m ai_news_digest.cli runs               # text summary of traced runs (TRACE_FILES or TRACE_DIR)
     python -m ai_news_digest.cli reset-memory --yes # app container: DELETE the SQLite memory
@@ -56,7 +57,7 @@ def check_config() -> bool:
 
 
 async def smoke(agent_turn: bool) -> bool:
-    from ai_news_digest.coordinator.openclaw_client import OpenClawClient
+    from ai_news_digest.openclaw_client import OpenClawClient
 
     good = True
     try:
@@ -64,10 +65,11 @@ async def smoke(agent_turn: bool) -> bool:
                                 agent_id=config.openclaw_agent_id())
         health = await client.health()
         agents = await client.list_agents()
-        if client.model in agents:
-            _ok("OpenClaw Gateway", f"{health.get('status')}; agent target {client.model} available")
+        targets = {client.model, "openclaw/researcher"}
+        if targets <= set(agents):
+            _ok("OpenClaw Gateway", f"{health.get('status')}; agent targets {sorted(targets)} available")
         else:
-            _fail("OpenClaw Gateway", f"agent {client.model} not in {agents}")
+            _fail("OpenClaw Gateway", f"agents {sorted(targets)} not all in {agents}")
             good = False
     except Exception as exc:  # noqa: BLE001
         _fail("OpenClaw Gateway", f"{type(exc).__name__}: {str(exc)[:200]}")
@@ -108,39 +110,49 @@ async def _agent_turn() -> bool:
     tracer = Tracer("app", config.trace_dir())
     memory = MemoryStore(config.editor_db_path(), config.load_digest_defaults())
     coordinator = build_coordinator(tracer, memory)
-    turn = await coordinator.handle("Какие интересы и настройки ты сохранил?", "smoke-check")
+    turn = await coordinator.handle("What interests and settings have you saved?", "smoke-check")
     sent: list[str] = []
 
     async def capture(text: str) -> None:
         sent.append(text)
 
     await coordinator.deliver(turn, capture)
+    events = [e for e in read_events([tracer.path]) if e["trace_id"] == turn.trace_id]
+    tools = [f"{e['name']}:{e['status']}" for e in events if e["kind"] == "tool_call"]
     if turn.kind == "reply" and not turn.failed:
-        _ok("OpenClaw Coordinator turn", f"trace {turn.trace_id}, runs {turn.openclaw_run_ids}: {sent[0][:120]!r}")
+        _ok("OpenClaw Coordinator turn", f"trace {turn.trace_id}, runs {turn.openclaw_run_ids}, "
+                                         f"app-executed tools {tools}: {sent[0][:120]!r}")
         return True
     _fail("OpenClaw Coordinator turn", f"kind={turn.kind} text={(turn.text or '')[:200]!r}")
     return False
 
 
 async def model_check() -> bool:
-    llm_cfg = config.load_llm_config()
-    try:
-        import anthropic
+    """One real model call of the OpenClaw `researcher` agent that must come back as a tool call."""
+    from ai_news_digest.openclaw_client import OpenClawClient
 
-        client = anthropic.AsyncAnthropic(api_key=llm_cfg.api_key, timeout=60, max_retries=1)
-        model = await client.models.retrieve(llm_cfg.model)
-        _ok("Anthropic model available", f"{model.id} ({model.display_name})")
-        resp = await client.messages.create(
-            model=llm_cfg.model, max_tokens=200, output_config={"effort": "low"},
-            messages=[{"role": "user", "content": "Reply with the single word: pong"}],
-        )
-        text = "".join(b.text for b in resp.content if b.type == "text").strip()
-        _ok("Anthropic messages.create", f"stop_reason={resp.stop_reason} text={text[:40]!r} "
-                                          f"usage=in:{resp.usage.input_tokens}/out:{resp.usage.output_tokens}")
-        return True
+    client = OpenClawClient(config.openclaw_url(), config.openclaw_gateway_token(), agent_id="researcher",
+                            timeout_seconds=config.openclaw_timeout_seconds())
+    tool = {"type": "function", "function": {
+        "name": "submit_selection", "description": "Submit the final selection of relevant items. Ends the task.",
+        "parameters": {"type": "object", "additionalProperties": False, "required": ["selected"], "properties": {
+            "selected": {"type": "array", "items": {"type": "object"}}, "notes": {"type": "string"}}}}}
+    key = f"research-model-check-{new_id('')}"
+    try:
+        r = await client.chat(session_key=key, tool_choice="required", tools=[tool], messages=[{
+            "role": "user", "content": "Model check (no sources in this task): call submit_selection with an empty "
+                                       "selection and notes='model-check'."}])
     except Exception as exc:  # noqa: BLE001
-        _fail("Anthropic", f"{type(exc).__name__}: {str(exc)[:300]}")
+        _fail("OpenClaw researcher model call", f"{type(exc).__name__}: {str(exc)[:300]}")
         return False
+    names = [c.name for c in r.tool_calls]
+    if names == ["submit_selection"]:
+        _ok("OpenClaw researcher model call", f"run {r.run_id}, session {client.scoped_session_key(key)}, "
+                                              f"tool_call {names}, usage {r.usage or 'n/a'}")
+        return True
+    _fail("OpenClaw researcher model call", f"run {r.run_id}: expected a submit_selection tool call, got "
+                                            f"{names or repr(r.content[:120])}")
+    return False
 
 
 async def research_once(period: int) -> int:

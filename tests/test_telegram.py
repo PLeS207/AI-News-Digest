@@ -46,15 +46,15 @@ async def test_unauthorized_user_never_reaches_runtime(tmp_path, tracer, sources
     async def send(text):
         sent.append(text)
 
-    out = await process_text(gate=gate, coordinator=coord, user_id=222, chat_key="c", text="Подготовь дайджест",
+    out = await process_text(gate=gate, coordinator=coord, user_id=222, chat_key="c", text="Prepare a digest",
                              send=send)
     assert out == {"rejected": True} and gateway.requests == []
-    assert "Доступ запрещён" in sent[0]
+    assert "Access denied" in sent[0]
     events = read_events([tracer.path])
     assert events[-1]["kind"] == "auth" and events[-1]["status"] == "denied"
     assert "222" not in tracer.path.read_text()  # rejected id is not logged
 
-    out = await process_text(gate=gate, coordinator=coord, user_id=111, chat_key="c", text="привет", send=send)
+    out = await process_text(gate=gate, coordinator=coord, user_id=111, chat_key="c", text="hello", send=send)
     assert out["rejected"] is False and gateway.requests
 
 
@@ -108,14 +108,14 @@ def _update(user_id: int, text: str, update_id: int = 1) -> dict:
 
 
 async def test_ptb_application_wiring_with_fake_bot_api(tmp_path, tracer, sources, defaults, limits,
-                                                        researcher_llm, researcher_tracer, feed_http):
+                                                        researcher_openclaw, researcher_tracer, feed_http):
     from telegram import Update
 
     from ai_news_digest.researcher.agent import Researcher
     from ai_news_digest.telegram_bot import build_application
     from conftest import NOW
 
-    researcher = Researcher(llm=researcher_llm, sources=sources, limits=limits, tracer=researcher_tracer,
+    researcher = Researcher(openclaw=researcher_openclaw, sources=sources, limits=limits, tracer=researcher_tracer,
                             http_client=feed_http)
 
     async def research(req):
@@ -128,14 +128,15 @@ async def test_ptb_application_wiring_with_fake_bot_api(tmp_path, tracer, source
     await app.initialize()
     try:
         await app.process_update(Update.de_json(_update(222, "/digest", 1), app.bot))
-        assert gateway.requests == [] and "Доступ запрещён" in api.sent_texts()[-1]
+        assert gateway.requests == [] and "Access denied" in api.sent_texts()[-1]
 
+        # Russian on purpose: users may write in any language (fixed bot text stays English)
         await app.process_update(Update.de_json(_update(111, "Запомни: максимум 2 новости", 2), app.bot))
         assert memory.get_settings()[0].max_items == 2
         assert any(m == "sendChatAction" for m, _ in api.calls)
 
         await app.process_update(Update.de_json(_update(111, "/digest", 3), app.bot))
-        assert any("AI-дайджест" in t for t in api.sent_texts()) and len(memory.delivered_urls()) == 2
+        assert any("AI digest for the last" in t for t in api.sent_texts()) and len(memory.delivered_urls()) == 2
         first_digest_call = [r for r in gateway.requests if r["body"]["messages"][0]["role"] == "user"][-1]
         assert "routed_intent" in first_digest_call["body"]["messages"][0]["content"]
 
@@ -143,14 +144,14 @@ async def test_ptb_application_wiring_with_fake_bot_api(tmp_path, tracer, source
         n = len(api.sent_texts())
         await app.process_update(Update.de_json(_update(111, "/last", 4), app.bot))
         resent = api.sent_texts()[n:]
-        assert resent and "Повтор сохранённого дайджеста" in resent[0]
+        assert resent and "Re-sending the saved digest" in resent[0]
         assert (memory.stats(), memory.delivered_urls()) == before
 
         old_session = coord.session_key("111")
         await app.process_update(Update.de_json(_update(111, "/new", 5), app.bot))
-        assert "Новая беседа" in api.sent_texts()[-1] and coord.session_key("111") != old_session
+        assert "New conversation" in api.sent_texts()[-1] and coord.session_key("111") != old_session
         await app.process_update(Update.de_json(_update(111, "/settings", 6), app.bot))
-        assert "Новостей в дайджесте: до 2" in api.sent_texts()[-1] and "SQLite" in api.sent_texts()[-1]
+        assert "Max items per digest: 2" in api.sent_texts()[-1] and "SQLite" in api.sent_texts()[-1]
         sends = [p for m, p in api.calls if m == "sendMessage"]
         assert all(p.get("parse_mode") in (None, "HTML") for p in sends)
     finally:

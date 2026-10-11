@@ -8,7 +8,7 @@ def test_defaults_are_not_stored(tmp_path, defaults):
     store = MemoryStore(tmp_path / "m.sqlite3", defaults)
     settings, stored = store.get_settings()
     assert not stored
-    assert settings.max_items == 5 and settings.language == "ru" and settings.period_hours == 72
+    assert settings.max_items == 5 and settings.language == "en" and settings.period_hours == 72
 
 
 def test_settings_survive_recreating_the_store(tmp_path, defaults):

@@ -2,7 +2,8 @@ name: ai-news-digest
 
 # Four runtime services: openclaw (Coordinator agent), researcher (A2A agent), app (Telegram + backend
 # tools + delivery), dashboard. openclaw-init prepares the isolated OpenClaw state before start.
-# Secrets are passed per service: Telegram only to app, Anthropic only to openclaw and researcher.
+# Secrets are passed per service: Telegram only to app; the Gateway token to app and researcher.
+# Model access: ChatGPT/Codex subscription (OAuth profile inside openclaw_state); no model API keys.
 
 x-python: &python
   build: .
@@ -19,7 +20,8 @@ services:
     environment:
       OPENCLAW_STATE_DIR: /home/node/.openclaw
       OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
-      OPENCLAW_EDITOR_MODEL: "anthropic/${ANTHROPIC_MODEL:-claude-opus-5-5}"
+      OPENAI_CODEX_MODEL: "${OPENAI_CODEX_MODEL:-gpt-5.6-luna}"              # both agents: openai/<id>
+      OPENAI_CODEX_RESEARCHER_MODEL: "${OPENAI_CODEX_RESEARCHER_MODEL:-}"   # optional Researcher override
       OPENCLAW_THINKING: "${OPENCLAW_THINKING:-low}"
     volumes:
       - ./openclaw:/opt/digest:ro
@@ -27,6 +29,8 @@ services:
       - openclaw_workspace:/workspace
       - openclaw_traces:/traces/openclaw
     restart: "no"
+    healthcheck:
+      disable: true   # one-shot job; the image's Gateway healthcheck does not apply
 
   openclaw:
     image: *openclaw-image
@@ -41,7 +45,7 @@ services:
       OPENCLAW_STATE_DIR: /home/node/.openclaw
       OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
       OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN in .env (openssl rand -hex 32)}"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # No model API keys here: the model credential is the ChatGPT/Codex OAuth profile in openclaw_state.
     volumes:
       - openclaw_state:/home/node/.openclaw
       - openclaw_workspace:/workspace
@@ -63,11 +67,15 @@ services:
   researcher:
     <<: *python
     command: ["python", "-m", "ai_news_digest.researcher.server"]
+    depends_on:
+      openclaw:
+        condition: service_healthy
     environment:
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
-      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-opus-5-5}"
-      ANTHROPIC_EFFORT: "${ANTHROPIC_EFFORT:-low}"
-      ANTHROPIC_REFUSAL_FALLBACK: "${ANTHROPIC_REFUSAL_FALLBACK:-true}"
+      # The model loop runs in the OpenClaw `researcher` agent (ChatGPT/Codex subscription); this service
+      # keeps the A2A server, the RSS tools and the ResearchRequest/ResearchResult contracts.
+      OPENCLAW_URL: http://openclaw:18789
+      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN in .env (openssl rand -hex 32)}"
+      OPENCLAW_TIMEOUT_SECONDS: "${RESEARCHER_GATEWAY_TIMEOUT_SECONDS:-240}"   # below A2A_TIMEOUT_SECONDS
       AGENT_MAX_ITERATIONS: "${AGENT_MAX_ITERATIONS:-4}"
       AGENT_MAX_TOOL_CALLS: "${AGENT_MAX_TOOL_CALLS:-8}"
       RSS_MAX_TOTAL_ENTRIES: "${RSS_MAX_TOTAL_ENTRIES:-30}"
@@ -105,7 +113,7 @@ services:
       RESEARCHER_URL: http://researcher:9100
       A2A_TIMEOUT_SECONDS: "${A2A_TIMEOUT_SECONDS:-300}"
       A2A_MAX_ATTEMPTS: "${A2A_MAX_ATTEMPTS:-2}"
-      DEFAULT_LANGUAGE: "${DEFAULT_LANGUAGE:-ru}"
+      DEFAULT_LANGUAGE: "${DEFAULT_LANGUAGE:-en}"
       DEFAULT_MAX_ITEMS: "${DEFAULT_MAX_ITEMS:-5}"
       DEFAULT_PERIOD_HOURS: "${DEFAULT_PERIOD_HOURS:-72}"
       EDITOR_DB_PATH: /data/editor/memory.sqlite3   # same volume/path as before the migration
@@ -135,7 +143,7 @@ services:
       - researcher_traces:/traces/researcher:ro
       - openclaw_traces:/traces/openclaw:ro
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"   # offline project: DASHBOARD_PORT=8502
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
       interval: 30s

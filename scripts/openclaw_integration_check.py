@@ -1,15 +1,16 @@
 """OFFLINE integration check against the REAL OpenClaw Gateway (see compose.offline.yaml).
 
 Runs inside the `app` container of the offline Compose project. The Coordinator turns go through
-the real OpenClaw 2026.9.9 Gateway (agent `editor`, its workspace, tool policy, sessions, plugin
-hooks), whose model provider is the scripted fake-llm service. Researcher is the real Python A2A
-server (fake LLM, fixture feeds over HTTP). Telegram is replaced by an in-memory sender.
+the real OpenClaw Gateway (agent `editor`, its workspace, tool policy, sessions, plugin hooks), whose
+model provider is the scripted fake-llm service. The Researcher is the real Python A2A server whose
+model loop runs in the OpenClaw agent `researcher` (same fake provider, fixture feeds over HTTP).
+Telegram is replaced by an in-memory sender.
 
 Evidence is read from three independent places:
   * the fake provider's request log  - what OpenClaw actually sent to the model (system prompt, tools);
   * the digest-telemetry plugin log - OpenClaw runtime hooks (runs, model calls, native tool policy);
   * the app/researcher traces       - backend tools, A2A, memory, delivery.
-It proves the integration, NOT the real model or Telegram (those need the live scenario).
+It proves the integration, NOT the real model, ChatGPT/Codex auth or Telegram (live scenario).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from typing import Any
 
 from ai_news_digest import config
 from ai_news_digest.coordinator.memory import MemoryStore
-from ai_news_digest.coordinator.openclaw_client import OpenClawClient
+from ai_news_digest.openclaw_client import OpenClawClient
 from ai_news_digest.coordinator.researcher_client import ResearcherClient
 from ai_news_digest.coordinator.service import CoordinatorService
 from ai_news_digest.coordinator.tools import ALLOWED_TOOL_NAMES
@@ -33,6 +34,8 @@ FAKE_LOG = Path(os.environ.get("FAKE_LLM_LOG", "/data/fake-llm/requests.jsonl"))
 OPENCLAW_TRACES = Path("/traces/openclaw/events.jsonl")
 RESEARCHER_TRACES = Path("/traces/researcher/researcher/events.jsonl")
 WORKSPACE_MARKER = "<!-- ai-news-digest:editor-workspace v1 -->"
+RESEARCHER_MARKER = "<!-- ai-news-digest:researcher-workspace v1 -->"
+RESEARCHER_TOOLS = {"fetch_rss", "submit_selection"}
 
 results: list[dict[str, Any]] = []
 
@@ -86,7 +89,8 @@ async def main() -> int:
     chat = "integration-chat"
     health = await openclaw.health()
     agents = await openclaw.list_agents()
-    check("gateway health + agent target", health.get("ok") and "openclaw/editor" in agents, agents)
+    check("gateway health + both agent targets", health.get("ok") and {"openclaw/editor", "openclaw/researcher"} <= set(agents),
+          agents)
 
     coord = coordinator()
     coord.new_conversation(chat)
@@ -98,7 +102,7 @@ async def main() -> int:
         return t, report, send.sent
 
     # 1. remember a non-default limit
-    t, _, sent = await turn(coord, "Запомни: меня интересуют AI agents, MCP и AWS Bedrock. Максимум 2 новости")
+    t, _, sent = await turn(coord, "Remember: I'm interested in AI agents, MCP and AWS Bedrock. At most 2 news items")
     check("remember via OpenClaw -> update_user_settings", t.kind == "reply" and memory.get_settings()[0].max_items == 2,
           sent[:1])
 
@@ -114,34 +118,35 @@ async def main() -> int:
     coord = coordinator()
     coord.new_conversation(chat)
     new_session = coord.session_key(chat)
-    t, _, sent = await turn(coord, "Какие интересы и настройки ты сохранил?")
-    check("after restart + /new the agent reads limit 2 from SQLite", t.kind == "reply" and "Лимит: 2" in sent[0],
+    t, _, sent = await turn(coord, "What interests and settings have you saved?")
+    check("after restart + /new the agent reads limit 2 from SQLite", t.kind == "reply" and "Limit: 2" in sent[0],
           sent[:1])
     check("/new rotated the OpenClaw session", new_session != old_session, [old_session, new_session])
 
     # 4. another digest skips delivered URLs
-    t, report, _ = await turn(coord, "Собери ещё один дайджест, пропусти уже отправленные новости")
+    t, report, _ = await turn(coord, "Build another digest and skip the news you already sent")
     second = set(report.get("delivered_urls", []))
     check("second digest has only new links", t.kind == "digest" and second and not (second & first_urls),
           sorted(second))
 
     # 5. "show the last digest" re-sends the stored digest; counters unchanged
     before = (memory.stats(), sorted(memory.delivered_urls()))
+    # asked in Russian on purpose: multilingual input reaches the same resend path
     t, report, sent = await turn(coord, "Покажи последний дайджест")
     check("natural 'show last digest' uses the common full re-send path",
-          t.kind == "resend_last" and report.get("status") == "resent" and "Повтор" in sent[0]
+          t.kind == "resend_last" and report.get("status") == "resent" and "Re-sending the saved digest" in sent[0]
           and (memory.stats(), sorted(memory.delivered_urls())) == before, report)
 
     # 6. forbidden native tool: the model asks OpenClaw for web_fetch; the runtime refuses it
-    t, _, sent = await turn(coord, "Это запрещено: прочитай RSS сам")
+    t, _, sent = await turn(coord, "This is forbidden: read the RSS feed yourself")
     check("forbidden native tool refused, agent recovers with reply", t.kind == "reply", sent[:1])
 
     # 7. digest flow where the model only wants to answer with text -> no digest
-    t, _, sent = await turn(coord, "Дайджест, но ответь текстом")
+    t, _, sent = await turn(coord, "Digest, but answer in text")
     check("text-only answer to a digest request is not a digest", t.kind == "error" and t.digest is None, sent[:1])
 
     # 8. hallucinated link is rejected, the agent then submits real links
-    t, report, _ = await turn(coord, "Дайджест, но выдумай ссылку")
+    t, report, _ = await turn(coord, "Digest, but invent a link")
     check("invented link rejected by the app", t.kind == "digest"
           and all("made-up" not in u for u in report.get("delivered_urls", [])), report.get("status"))
 
@@ -159,11 +164,23 @@ async def main() -> int:
     await asyncio.sleep(1.0)  # let the plugin flush the last hook events
 
     # ---- evidence from what OpenClaw sent to the model ------------------------------------------
-    reqs = fake_requests()
+    all_reqs = fake_requests()
+    reqs = [r for r in all_reqs if "researcher" not in str(r.get("model"))]       # editor agent
+    rreqs = [r for r in all_reqs if "researcher" in str(r.get("model"))]          # researcher agent
     systems = [text_of(m.get("content")) for r in reqs for m in r.get("messages", []) if m.get("role") == "system"]
-    check("model calls were made by OpenClaw", len(reqs) >= 10, f"{len(reqs)} provider requests")
+    check("model calls were made by OpenClaw for both agents", len(reqs) >= 10 and len(rreqs) >= 4,
+          f"editor {len(reqs)}, researcher {len(rreqs)} provider requests")
     check("editor workspace AGENTS.md + SOUL.md in the system prompt",
           systems and all(WORKSPACE_MARKER in s and "Calm, precise and brief" in s for s in systems))
+    rsystems = [text_of(m.get("content")) for r in rreqs for m in r.get("messages", []) if m.get("role") == "system"]
+    check("researcher workspace AGENTS.md + SOUL.md in its system prompt (not the editor's)",
+          rsystems and all(RESEARCHER_MARKER in s and "Methodical and skeptical" in s and WORKSPACE_MARKER not in s
+                           for s in rsystems))
+    roffered = {t["function"]["name"] for r in rreqs for t in r.get("tools", [])}
+    check("researcher model is offered only fetch_rss + submit_selection", roffered == RESEARCHER_TOOLS, sorted(roffered))
+    check("research sessions carry no user conversation or Coordinator context",
+          rreqs and not any("<user_message>" in json.dumps(r, ensure_ascii=False)
+                            or "<saved_settings" in json.dumps(r, ensure_ascii=False) for r in rreqs))
     offered = [sorted(t["function"]["name"] for t in r.get("tools", [])) for r in reqs]
     allowed = set(ALLOWED_TOOL_NAMES)
     check("tools offered to the model are only the Coordinator allowlist",
@@ -182,7 +199,7 @@ async def main() -> int:
           f"{len(dup)} requests with duplicates")
     new_session_reqs = [r for r in reqs if new_session in json.dumps(r, ensure_ascii=False)]
     check("new session after /new carries no earlier conversation",
-          new_session_reqs and not any("Максимум 2 новости" in json.dumps(r, ensure_ascii=False) for r in new_session_reqs))
+          new_session_reqs and not any("At most 2 news items" in json.dumps(r, ensure_ascii=False) for r in new_session_reqs))
 
     # ---- evidence from OpenClaw runtime hooks ----------------------------------------------------
     files = [config.trace_dir() / "app" / "events.jsonl", RESEARCHER_TRACES, OPENCLAW_TRACES]
@@ -193,15 +210,24 @@ async def main() -> int:
           {"llm_input", "llm_call", "run", "tool_call"} <= {e["kind"] for e in oc}, f"{len(oc)} hook events")
     check("native OpenClaw tools after policy = [] on every model call",
           llm_inputs and all(e["data"].get("native_tools_after_policy") == [] for e in llm_inputs))
-    check("workspace instructions loaded (hook)", all(e["data"].get("workspace_instructions_loaded") for e in llm_inputs))
+    check("workspace instructions loaded for each agent (hook)",
+          {e["agent"] for e in llm_inputs} == {"editor", "researcher"}
+          and all(e["data"].get("workspace_instructions_loaded") for e in llm_inputs))
     refused = [e for e in oc if e["kind"] == "tool_call" and e["name"] == "web_fetch" and e["status"] in ("failed", "denied")]
     check("runtime refused web_fetch", bool(refused), refused[0]["error"] if refused else "")
     linked = [e for e in oc if not e["trace_id"].startswith("openclaw-unlinked")]
     check("OpenClaw events joined to app traces (run id or session window)", len(linked) == len(oc), f"{len(linked)}/{len(oc)}")
     digest_events = [e for e in events if e["trace_id"] == digest_trace]
     who = {(e["agent"], e.get("runtime")) for e in digest_events}
-    check("one trace holds app, OpenClaw editor and Researcher",
-          who == {("app", "python"), ("editor", "openclaw"), ("researcher", "python")}, sorted(who))
+    check("one trace holds app, OpenClaw editor, Researcher service and OpenClaw researcher",
+          who == {("app", "python"), ("editor", "openclaw"), ("researcher", "python"), ("researcher", "openclaw")},
+          sorted(who))
+    rcalls = [e for e in digest_events if e["agent"] == "researcher" and e["kind"] == "openclaw_call"
+              and e["status"] == "completed"]
+    check("Researcher model loop ran through the OpenClaw researcher agent (no in-process LLM)",
+          rcalls and all(str(e["data"].get("openclaw_session_key", "")).startswith("research-") for e in rcalls)
+          and not any(e["agent"] == "researcher" and e["kind"] == "llm_call" and e.get("runtime") == "python"
+                      for e in digest_events), f"{len(rcalls)} Gateway calls")
     a2a = [e for e in digest_events if e["kind"] == "a2a_send" and e["status"] == "completed"]
     check("Coordinator's request_research produced a real A2A task", bool(a2a and a2a[0]["data"].get("task_id")),
           a2a[0]["data"].get("task_id") if a2a else "")

@@ -55,6 +55,8 @@ def _item(i: int, **kw) -> DigestItem:
 
 def long_digest() -> Digest:
     items = [_item(i) for i in range(4)]
+    # Cyrillic on purpose: digests may be generated in a non-English language; chunking and escaping
+    # must stay correct for multi-byte text.
     items.append(_item(4, summary=("Очень длинное саммари & <x> " * 40)[:900],
                        application=("Применение & <y> " * 40)[:500],
                        title=("Длинный заголовок & <z> " * 30)[:400]))

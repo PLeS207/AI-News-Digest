@@ -26,10 +26,11 @@ AGENT = "app"
 URL_RE = re.compile(r"https?://|www\.", re.I)
 
 # --- routing --------------------------------------------------------------------------------------
+# English and Russian on purpose: users may write in either language (multilingual input support).
 _DIGEST_WORDS = re.compile(r"(дайджест|digest|новост|news)", re.I)
 _NOT_NEW_DIGEST = re.compile(
-    r"((последн|прошл|предыдущ)\w*\s+(дайджест|выпуск)|сохран|настро|запомни|\blast\s+digest|previous\s+digest|"
-    r"setting|remember)", re.I)
+    r"((последн|прошл|предыдущ)\w*\s+(дайджест|выпуск)|сохран|настро|запомни|"
+    r"\b(last|latest|previous|recent|saved|stored)\s+digest|\bresend|\bre-send|setting|remember)", re.I)
 
 
 def route_intent(text: str, command: str | None = None) -> str | None:

@@ -17,18 +17,12 @@ from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
 from pydantic import ValidationError
 from starlette.applications import Starlette
 
-from ai_news_digest import __version__
-from ai_news_digest.agents.llm import AnthropicBackend, LLMBackend
-from ai_news_digest.config import (
-    ConfigError,
-    load_limits,
-    load_llm_config,
-    load_sources,
-    require_api_key,
-    trace_dir,
-)
+from ai_news_digest import __version__, config
+from ai_news_digest.config import ConfigError, load_limits, load_sources, trace_dir
+from ai_news_digest.openclaw_client import OpenClawClient
 from ai_news_digest.models import RESEARCH_REQUEST_MEDIA_TYPE, RESEARCH_RESULT_MEDIA_TYPE, ResearchRequest
 from ai_news_digest.researcher.agent import Researcher
+from ai_news_digest.researcher.openclaw_loop import session_key
 from ai_news_digest.tracing import Tracer
 
 log = logging.getLogger("researcher")
@@ -92,6 +86,8 @@ class ResearcherExecutor(AgentExecutor):
             return
 
         a2a_data = {"task_id": task.id, "context_id": task.context_id, "request_id": request.request_id}
+        a2a_data |= {"openclaw_session_key": session_key(request.request_id),
+                     "openclaw_agent": self.researcher.openclaw.model}
         with self.tracer.span(trace_id, agent="researcher", kind="run", name="research",
                               input=request.model_dump(mode="json", exclude={"exclude_urls"}) | {
                                   "exclude_urls_count": len(request.exclude_urls)},
@@ -139,11 +135,8 @@ def build_app(researcher: Researcher, tracer: Tracer, public_url: str) -> Starle
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    fake_mode = os.environ.get("RESEARCHER_LLM", "anthropic") == "fake"
     try:
-        llm_cfg = load_llm_config()
-        if not fake_mode:
-            require_api_key(llm_cfg)
+        token = config.openclaw_gateway_token()
         sources = load_sources()
     except ConfigError as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
@@ -152,21 +145,17 @@ def main() -> None:
     public_url = os.environ.get("RESEARCHER_PUBLIC_URL", f"http://localhost:{port}")
     tracer = Tracer("researcher", trace_dir())
     fixed_now = None
-    if fake_mode:  # OFFLINE integration check only: scripted LLM + fixture feeds, never in the live setup
+    if os.environ.get("RESEARCHER_FIXED_NOW"):  # offline integration check only (fixture feeds)
         from datetime import datetime
 
-        from ai_news_digest.agents.llm import ScriptedBackend
-        from ai_news_digest.testing.fakes import researcher_script
-
-        llm: LLMBackend = ScriptedBackend(researcher_script, model="fake-researcher")
-        if os.environ.get("RESEARCHER_FIXED_NOW"):
-            fixed_now = datetime.fromisoformat(os.environ["RESEARCHER_FIXED_NOW"])
-        log.warning("RESEARCHER_LLM=fake: scripted LLM for offline checks (not a live configuration)")
-    else:
-        llm = AnthropicBackend(llm_cfg)
-    researcher = Researcher(llm=llm, sources=sources, limits=load_limits(), tracer=tracer, fixed_now=fixed_now)
-    log.info("Researcher A2A server on %s:%s (card url %s, model %s, sources %s)",
-             host, port, public_url, llm.model, [s.id for s in sources])
+        fixed_now = datetime.fromisoformat(os.environ["RESEARCHER_FIXED_NOW"])
+    # The model loop runs in the OpenClaw `researcher` agent (ChatGPT/Codex subscription sign-in).
+    openclaw = OpenClawClient(config.openclaw_url(), token, agent_id="researcher",
+                              timeout_seconds=config.openclaw_timeout_seconds())
+    researcher = Researcher(openclaw=openclaw, sources=sources, limits=load_limits(), tracer=tracer,
+                            fixed_now=fixed_now)
+    log.info("Researcher A2A server on %s:%s (card url %s, model agent %s, sources %s)",
+             host, port, public_url, openclaw.model, [s.id for s in sources])
     uvicorn.run(build_app(researcher, tracer, public_url), host=host, port=port, log_level="info")
 
 

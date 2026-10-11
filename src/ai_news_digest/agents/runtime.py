@@ -1,14 +1,12 @@
-"""Minimal bounded agent loop with per-role tool registries enforced at dispatch time."""
+"""Per-role tool registries enforced at dispatch time, plus the shared agent error types.
+
+The model loop itself runs in OpenClaw (see researcher/openclaw_loop.py and coordinator/service.py)."""
 
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from ai_news_digest.agents.llm import LLMBackend, LLMResponse
-from ai_news_digest.tracing import Tracer, clip
 
 
 class ToolPermissionError(PermissionError):
@@ -20,7 +18,7 @@ class ToolInputError(ValueError):
 
 
 class AgentLimitError(RuntimeError):
-    """Raised when the agent exceeds its LLM iteration budget without finishing."""
+    """Raised when the agent exceeds its Gateway-call budget without finishing."""
 
 
 class AgentLLMError(RuntimeError):
@@ -80,112 +78,9 @@ class AgentRunResult:
 
 @dataclass
 class AgentSpec:
+    """A role's tools and budgets. Its instructions live in the agent's OpenClaw workspace."""
+
     role: str
-    system_prompt: str
     registry: ToolRegistry
-    max_iterations: int = 4
+    max_iterations: int = 4  # Gateway calls per task
     max_tool_calls: int = 8
-
-
-def _accumulate(total: dict[str, int], usage: dict[str, Any]) -> None:
-    for key, value in usage.items():
-        if isinstance(value, int):
-            total[key] = total.get(key, 0) + value
-
-
-async def run_agent(
-    spec: AgentSpec,
-    *,
-    llm: LLMBackend,
-    tracer: Tracer,
-    trace_id: str,
-    user_content: str,
-    ctx: Any,
-    history: list[dict[str, Any]] | None = None,
-) -> AgentRunResult:
-    messages: list[dict[str, Any]] = list(history or []) + [{"role": "user", "content": user_content}]
-    tools = spec.registry.definitions()
-    result = AgentRunResult(text="")
-
-    for iteration in range(1, spec.max_iterations + 1):
-        result.iterations = iteration
-        with tracer.span(
-            trace_id, agent=spec.role, kind="llm_call", name=f"{spec.role}.llm#{iteration}",
-            input=messages[-1]["content"] if iteration == 1 else f"{len(messages)} messages",
-            data={"model": llm.model, "iteration": iteration, "tools": spec.registry.names},
-        ) as span:
-            response: LLMResponse = await llm.create(system=spec.system_prompt, messages=messages, tools=tools)
-            span.data.update({
-                "stop_reason": response.stop_reason, "usage": response.usage,
-                "response_model": response.model, "request_id": response.request_id,
-                "tool_uses": [t["name"] for t in response.tool_uses()],
-            })
-            span.set_output(response.text() or None)
-        _accumulate(result.usage, response.usage)
-
-        if response.stop_reason == "refusal":
-            raise AgentLLMError("model refused the request")
-        if response.stop_reason == "max_tokens":
-            raise AgentLLMError("model hit max_tokens before finishing")
-
-        messages.append({"role": "assistant", "content": response.content})
-        tool_uses = response.tool_uses()
-
-        if response.stop_reason == "pause_turn":
-            continue
-        if not tool_uses:
-            result.text = response.text()
-            return result
-
-        tool_results: list[dict[str, Any]] = []
-        terminal_hit: tuple[str, Any] | None = None
-        for call in tool_uses:
-            name, args, call_id = call["name"], call.get("input") or {}, call["id"]
-            if result.tool_calls >= spec.max_tool_calls:
-                tracer.event(trace_id, agent=spec.role, kind="tool_call", name=name, status="denied",
-                             input=args, error="tool call budget exhausted",
-                             data={"limit": spec.max_tool_calls})
-                tool_results.append({"type": "tool_result", "tool_use_id": call_id, "is_error": True,
-                                     "content": f"Tool call budget ({spec.max_tool_calls}) exhausted."})
-                continue
-            result.tool_calls += 1
-            started = time.perf_counter()
-            try:
-                output = await spec.registry.dispatch(name, args, ctx)
-            except ToolPermissionError as exc:
-                tracer.event(trace_id, agent=spec.role, kind="tool_call", name=name, status="denied",
-                             input=args, error=str(exc),
-                             duration_ms=(time.perf_counter() - started) * 1000,
-                             data={"allowed": spec.registry.names})
-                tool_results.append({"type": "tool_result", "tool_use_id": call_id, "is_error": True,
-                                     "content": str(exc)})
-                continue
-            except (ToolInputError, ValueError) as exc:
-                tracer.event(trace_id, agent=spec.role, kind="tool_call", name=name, status="failed",
-                             input=args, error=str(exc),
-                             duration_ms=(time.perf_counter() - started) * 1000)
-                tool_results.append({"type": "tool_result", "tool_use_id": call_id, "is_error": True,
-                                     "content": f"Error: {exc}"})
-                continue
-            tracer.event(trace_id, agent=spec.role, kind="tool_call", name=name, status="completed",
-                         input=args, output=output, duration_ms=(time.perf_counter() - started) * 1000)
-            tool_results.append({"type": "tool_result", "tool_use_id": call_id,
-                                 "content": output if isinstance(output, str)
-                                 else json.dumps(output, ensure_ascii=False, default=str)})
-            if spec.registry.get(name).terminal and terminal_hit is None:
-                terminal_hit = (name, output)
-
-        if terminal_hit is not None:
-            result.terminal_tool, result.terminal_output = terminal_hit
-            result.text = response.text()
-            return result
-        messages.append({"role": "user", "content": tool_results})
-
-    raise AgentLimitError(
-        f"{spec.role} did not finish within {spec.max_iterations} LLM iterations "
-        f"({result.tool_calls} tool calls)"
-    )
-
-
-def short(value: Any, limit: int = 300) -> str:
-    return clip(value, limit) or ""

@@ -12,7 +12,9 @@ A free-text answer without a confirmed action is never delivered as a result.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -20,7 +22,7 @@ from typing import Any, Awaitable, Callable
 from ai_news_digest.config import SourceConfig
 from ai_news_digest.coordinator.delivery import SendFn, deliver_digest, deliver_text, resend_last_digest
 from ai_news_digest.coordinator.memory import MemoryStore
-from ai_news_digest.coordinator.openclaw_client import (
+from ai_news_digest.openclaw_client import (
     GatewayResponse,
     NoStructuredAction,
     OpenClawClient,
@@ -60,9 +62,15 @@ class CoordinatorService:
                  sources: list[SourceConfig]):
         self.openclaw = openclaw
         self.memory = memory
+        self._chat_locks: dict[str, asyncio.Lock] = {}
         self.tracer = tracer
         self.registry = CoordinatorToolRegistry(ToolContext(memory=memory, tracer=tracer, research=research,
                                                             sources={s.id: s for s in sources}))
+
+    def chat_lock(self, chat_key: str) -> asyncio.Lock:
+        """One turn (handle + deliver + loop closure) per chat at a time; different chats run in parallel,
+        each in its own OpenClaw session, and every turn has its own TurnState and trace id."""
+        return self._chat_locks.setdefault(chat_key, asyncio.Lock())
 
     # ---- sessions -------------------------------------------------------------------------------
     def session_key(self, chat_key: str) -> str:
@@ -123,7 +131,7 @@ class CoordinatorService:
 
             if state.research_error:
                 turn.kind, turn.failed = "error", True
-                turn.text = _researcher_error_text(settings.language, state.research_error)
+                turn.text = _researcher_error_text(state.research_error)
                 run.fail(f"researcher unavailable: {state.research_error}")
             elif state.outcome == "digest":
                 turn.kind, turn.digest = "digest", state.digest
@@ -137,7 +145,7 @@ class CoordinatorService:
             else:
                 turn.kind, turn.failed = "error", True
                 error = error or "no confirmed action"
-                turn.text = _coordinator_error_text(settings.language, error, state.digest_flow)
+                turn.text = _coordinator_error_text(error, state.digest_flow)
                 run.fail(error)
             run.data.update({"openclaw_run_ids": turn.openclaw_run_ids, "tool_calls": state.tool_calls,
                              "a2a_task_id": state.research_task_id, "outcome": state.outcome})
@@ -226,21 +234,28 @@ class CoordinatorService:
             pass  # already traced as failed; the user has the result
 
 
-def _researcher_error_text(language: str, error: str) -> str:
-    if language.lower().startswith("ru"):
-        return ("❌ Researcher недоступен, дайджест не сформирован. Новости не подставляются вместо "
-                f"результата исследования.\nПричина: {error[:300]}\nПопробуйте позже.")
-    return (f"❌ The Researcher agent is unavailable, so no digest was produced (no news is made up).\n"
-            f"Reason: {error[:300]}\nPlease try again later.")
+_QUOTA = re.compile(r"usage.?limit|rate.?limit|quota|too many requests|\b429\b|limit (reached|exceeded)", re.I)
 
 
-def _coordinator_error_text(language: str, error: str, digest_flow: bool) -> str:
-    ru = language.lower().startswith("ru")
+# Fixed system messages are English; the digest content itself follows the saved digest language.
+def _quota_text(who: str, error: str) -> str:
+    return (f"⏳ {who}: the ChatGPT/Codex subscription limit is exhausted or temporarily exceeded. The request was "
+            f"not processed and no paid API is used instead. Please retry later.\nDetails: {error[:200]}")
+
+
+def _researcher_error_text(error: str) -> str:
+    if _QUOTA.search(error):
+        return _quota_text("Researcher", error)
+    return ("❌ The Researcher is unavailable, so no digest was produced. No news is made up in place of the "
+            f"research result.\nReason: {error[:300]}\nPlease try again later.")
+
+
+def _coordinator_error_text(error: str, digest_flow: bool) -> str:
+    if _QUOTA.search(error):
+        return _quota_text("Coordinator", error)
     if error.startswith("openclaw:"):
-        return ("❌ Coordinator (OpenClaw) недоступен, запрос не выполнен. " if ru else
-                "❌ The OpenClaw Coordinator is unavailable; the request was not processed. ") + error[9:][:300]
+        return "❌ The Coordinator (OpenClaw) is unavailable; the request was not processed. " + error[9:][:300]
     if digest_flow:
-        return ("❌ Дайджест не создан: Coordinator не завершил проверяемый поток "
-                "(request_research → submit_digest). " if ru else
-                "❌ No digest was created: the Coordinator did not complete request_research → submit_digest. ") + error[:200]
-    return ("❌ Не удалось выполнить запрос: " if ru else "❌ Could not process the request: ") + error[:300]
+        return ("❌ No digest was created: the Coordinator did not complete the verified flow "
+                "(request_research → submit_digest). ") + error[:200]
+    return "❌ Could not process the request: " + error[:300]

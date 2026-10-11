@@ -1,6 +1,6 @@
 // OpenClaw plugin: records real runtime hook events for the AI News Digest dashboard and
-// enforces the Coordinator tool allowlist inside the Gateway (defense in depth; the app
-// re-checks every client tool call as well). Never records prompts, keys or user ids.
+// enforces a per-agent tool allowlist inside the Gateway (defense in depth; the app and the
+// Researcher re-check every client tool call as well). Never records prompts, keys or user ids.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -10,7 +10,9 @@ const clip = (value, limit = 400) => {
   if (value === undefined || value === null) return null;
   let text = typeof value === "string" ? value : JSON.stringify(value);
   text = text
-    .replace(/sk-ant-[A-Za-z0-9_-]{10,}/g, "[REDACTED]")
+    .replace(/sk-(ant-|proj-)?[A-Za-z0-9_-]{16,}/g, "[REDACTED]")
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED_JWT]")
+    .replace(/("?(access|refresh|id)_?token"?\s*[:=]\s*)"?[^\s"',}]+/gi, "$1[REDACTED]")
     .replace(/\b\d{6,12}:[A-Za-z0-9_-]{30,}\b/g, "[REDACTED]")
     .replace(/(authorization|x-api-key)\s*[:=]\s*(bearer\s+)?[^\s"',}]+/gi, "[REDACTED]");
   return text.length > limit ? `${text.slice(0, limit)}… [+${text.length - limit} chars]` : text;
@@ -25,12 +27,13 @@ const toolNames = (tools) =>
 export default definePluginEntry({
   id: "digest-telemetry",
   name: "AI News Digest telemetry",
-  description: "Hook events -> JSONL traces; Coordinator tool allowlist.",
+  description: "Hook events -> JSONL traces; per-agent tool allowlist.",
   register(api) {
     const cfg = api.pluginConfig ?? {};
     const traceFile = cfg.traceFile;
-    const allowed = new Set(cfg.allowedTools ?? []);
-    const marker = cfg.workspaceMarker;
+    const allowedByAgent = Object.fromEntries(
+      Object.entries(cfg.allowedToolsByAgent ?? {}).map(([agent, tools]) => [agent, new Set(tools)]));
+    const markers = cfg.workspaceMarkers ?? {};
     mkdirSync(dirname(traceFile), { recursive: true });
 
     const write = (kind, name, status, ctx, extra = {}) => {
@@ -40,7 +43,7 @@ export default definePluginEntry({
         trace_id: null, // joined to the app trace via data.openclaw_run_id
         span_id: randomUUID().replace(/-/g, "").slice(0, 16),
         service: "openclaw",
-        agent: ctx?.agentId ?? "editor",
+        agent: ctx?.agentId ?? "unknown",
         runtime: "openclaw",
         kind,
         name,
@@ -84,22 +87,25 @@ export default definePluginEntry({
         native_tools_after_policy: toolNames(event.tools),
         system_prompt_sha256: createHash("sha256").update(system).digest("hex").slice(0, 16),
         system_prompt_chars: system.length,
-        workspace_instructions_loaded: marker ? system.includes(marker) : null,
+        workspace_instructions_loaded: markers[ctx?.agentId] ? system.includes(markers[ctx.agentId]) : null,
         history_messages: Array.isArray(event.historyMessages) ? event.historyMessages.length : null,
       });
     });
     api.on("llm_output", (event, ctx) => {
       write("llm_output", "openclaw.llm_output", "completed", { ...ctx, runId: event.runId, sessionId: event.sessionId }, {
         provider: event.provider, model: event.model, resolved_ref: event.resolvedRef,
-        usage: event.usage ?? null, output: (event.assistantTexts ?? []).join("\n"),
+        // token counts only: OpenClaw's `cost` is an API-tariff estimate, meaningless for subscription auth
+        usage: event.usage ? Object.fromEntries(Object.entries(event.usage).filter(([k]) => k !== "cost")) : null,
+        output: (event.assistantTexts ?? []).join("\n"),
       });
     });
     api.on("before_tool_call", (event, ctx) => {
       const name = event.toolName ?? ctx?.toolName;
-      if (!allowed.has(name)) {
+      const agent = ctx?.agentId ?? "unknown";
+      if (!allowedByAgent[agent]?.has(name)) {
         write("tool_call", name, "denied", { ...ctx, runId: event.runId ?? ctx?.runId },
-          { input: event.params, error: `tool '${name}' is not in the Coordinator allowlist`, tool_call_id: event.toolCallId });
-        return { block: true, blockReason: `Tool '${name}' is not allowed for the editor agent.` };
+          { input: event.params, error: `tool '${name}' is not in the ${agent} allowlist`, tool_call_id: event.toolCallId });
+        return { block: true, blockReason: `Tool '${name}' is not allowed for the ${agent} agent.` };
       }
       write("tool_call", name, "started", { ...ctx, runId: event.runId ?? ctx?.runId },
         { input: event.params, tool_call_id: event.toolCallId, executed_by: "openclaw" });

@@ -1,7 +1,7 @@
 """Real A2A round trip over HTTP: official a2a-sdk server (uvicorn) + official a2a-sdk client.
 
-The LLM is fake (scripted) and RSS comes from local fixtures; the transport, Agent Card discovery,
-JSON-RPC calls, task lifecycle and result validation are real.
+The Researcher's model agent sits behind a FAKE OpenClaw Gateway and RSS comes from local fixtures;
+the A2A transport, Agent Card discovery, JSON-RPC calls, task lifecycle and result validation are real.
 """
 
 from __future__ import annotations
@@ -14,13 +14,13 @@ import httpx
 import pytest
 import uvicorn
 
-from ai_news_digest.agents.llm import ScriptedBackend
+from ai_news_digest.testing.fakes import ScriptedGateway
 from ai_news_digest.coordinator.researcher_client import ResearcherClient, ResearcherUnavailable
 from ai_news_digest.models import ResearchRequest
 from ai_news_digest.researcher.agent import Researcher
 from ai_news_digest.researcher.server import build_app
 from ai_news_digest.tracing import read_events
-from conftest import NOW
+from conftest import NOW, researcher_client
 
 
 def _free_port() -> int:
@@ -54,8 +54,8 @@ def _request(trace_id: str = "tr-a2a-0001", **kw) -> ResearchRequest:
     return ResearchRequest(**data)
 
 
-async def test_real_a2a_round_trip(sources, limits, researcher_llm, feed_http, tracer, researcher_tracer):
-    researcher = Researcher(llm=researcher_llm, sources=sources, limits=limits, tracer=researcher_tracer,
+async def test_real_a2a_round_trip(sources, limits, researcher_openclaw, feed_http, tracer, researcher_tracer):
+    researcher = Researcher(openclaw=researcher_openclaw, sources=sources, limits=limits, tracer=researcher_tracer,
                             http_client=feed_http)
     async with running_researcher(researcher, researcher_tracer) as url:
         # Agent Card is published at the well-known path
@@ -91,7 +91,7 @@ async def test_real_a2a_round_trip(sources, limits, researcher_llm, feed_http, t
     assert {e["trace_id"] for e in researcher_events} == {request.trace_id}
     rkinds = {(e["kind"], e["name"]) for e in researcher_events}
     assert ("tool_call", "fetch_rss") in rkinds and ("tool_call", "submit_selection") in rkinds
-    assert any(e["kind"] == "llm_call" for e in researcher_events)
+    assert any(e["kind"] == "openclaw_call" and e["status"] == "completed" for e in researcher_events)
     assert any(e["kind"] == "a2a_task" and e["data"].get("task_id") == task_id for e in researcher_events)
 
 
@@ -107,10 +107,8 @@ async def test_researcher_unavailable_is_retried_then_reported(tracer):
 
 
 async def test_failed_researcher_task_is_not_retried(sources, limits, feed_http, tracer, researcher_tracer):
-    def broken_llm(system, messages, tools):
-        raise RuntimeError("simulated model outage")
-
-    researcher = Researcher(llm=ScriptedBackend(broken_llm), sources=sources, limits=limits,
+    outage = ScriptedGateway(status=503, error="simulated model outage")
+    researcher = Researcher(openclaw=researcher_client(outage), sources=sources, limits=limits,
                             tracer=researcher_tracer, http_client=feed_http)
     async with running_researcher(researcher, researcher_tracer) as url:
         client = ResearcherClient(url, tracer, timeout_seconds=30, max_attempts=2, backoff_seconds=0.01)
@@ -123,12 +121,12 @@ async def test_failed_researcher_task_is_not_retried(sources, limits, feed_http,
     assert any(e["kind"] == "run" and e["status"] == "failed" for e in read_events([researcher_tracer.path]))
 
 
-async def test_invalid_request_is_rejected_by_server(sources, limits, researcher_llm, feed_http, researcher_tracer):
+async def test_invalid_request_is_rejected_by_server(sources, limits, researcher_openclaw, feed_http, researcher_tracer):
     from a2a.client import ClientConfig, create_client
     from a2a.helpers import new_data_part, new_message
     from a2a.types import Role, SendMessageRequest, TaskState
 
-    researcher = Researcher(llm=researcher_llm, sources=sources, limits=limits, tracer=researcher_tracer,
+    researcher = Researcher(openclaw=researcher_openclaw, sources=sources, limits=limits, tracer=researcher_tracer,
                             http_client=feed_http)
     async with running_researcher(researcher, researcher_tracer) as url:
         client = await create_client(url, client_config=ClientConfig(streaming=False))

@@ -1,7 +1,8 @@
 """Dashboard renders merged traces (headless Streamlit AppTest).
 
-The OpenClaw hook events below are TEST DATA shaped like the digest-telemetry plugin output; they
-check the join logic only. Real OpenClaw events come from scripts/openclaw_integration_check.py.
+App and Researcher traces come from a FAKE Gateway scenario with a real A2A exchange. The OpenClaw hook
+events below are TEST DATA shaped like the digest-telemetry plugin output; they check the join logic
+only. Real OpenClaw events come from scripts/openclaw_integration_check.py.
 """
 
 import json
@@ -14,13 +15,58 @@ streamlit_testing = pytest.importorskip("streamlit.testing.v1")
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def test_dashboard_shows_app_openclaw_and_researcher_in_one_trace(tmp_path, monkeypatch):
-    import importlib.util
+async def _generate_traces(out: Path) -> None:
+    """Fake Gateway for both agents, REAL A2A over HTTP, fixture feeds (one of them broken)."""
+    import httpx
 
-    spec = importlib.util.spec_from_file_location("offline_demo", ROOT / "scripts" / "offline_demo.py")
-    demo = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(demo)
-    await demo.main(tmp_path)
+    from ai_news_digest.config import DigestDefaults, Limits, SourceConfig
+    from ai_news_digest.coordinator.memory import MemoryStore
+    from ai_news_digest.coordinator.researcher_client import ResearcherClient
+    from ai_news_digest.coordinator.service import CoordinatorService
+    from ai_news_digest.openclaw_client import OpenClawClient
+    from ai_news_digest.researcher.agent import Researcher
+    from ai_news_digest.testing.fakes import FakeGateway
+    from ai_news_digest.tracing import Tracer
+    from conftest import GATEWAY_TOKEN, NOW, feed_handler, researcher_client
+    from test_a2a_roundtrip import running_researcher
+
+    sources = [
+        SourceConfig(id="openai_news", name="OpenAI News", url="https://feeds.test/openai.xml"),
+        SourceConfig(id="huggingface_blog", name="Hugging Face Blog", url="https://feeds.test/hf.xml"),
+        SourceConfig(id="aws_whats_new", name="AWS What's New", url="https://feeds.test/aws.xml", interest_filter=True),
+        SourceConfig(id="broken_source", name="Broken (demo)", url="https://feeds.test/broken.xml"),
+    ]
+    app_tracer, researcher_tracer = Tracer("app", out / "traces"), Tracer("researcher", out / "traces")
+    researcher = Researcher(
+        openclaw=researcher_client(FakeGateway(GATEWAY_TOKEN, agent_id="researcher").transport()),
+        sources=sources, limits=Limits(), tracer=researcher_tracer,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(feed_handler)))
+    editor = OpenClawClient("http://openclaw.test", GATEWAY_TOKEN, transport=FakeGateway(GATEWAY_TOKEN).transport())
+
+    async def send(text: str) -> None:
+        pass
+
+    async with running_researcher(researcher, researcher_tracer) as url:
+        client = ResearcherClient(url, app_tracer, timeout_seconds=30)
+
+        async def research(req):
+            return await client.research(req.model_copy(update={"now": NOW}))
+
+        coord = CoordinatorService(openclaw=editor, memory=MemoryStore(out / "memory.sqlite3", DigestDefaults()),
+                                   tracer=app_tracer, research=research, sources=sources)
+        for msg in ["Remember: I'm interested in AI agents, MCP and AWS Bedrock. At most 2 news items",
+                    "Prepare an AI news digest for the last 72 hours"]:
+            await coord.deliver(await coord.handle(msg, "demo"), send)
+        coord.new_conversation("demo")
+        for msg in ["What interests and settings have you saved?",
+                    "Build another digest and skip the news you already sent"]:
+            await coord.deliver(await coord.handle(msg, "demo"), send)
+    coord.registry.ctx.research = ResearcherClient(url, app_tracer, timeout_seconds=5, backoff_seconds=0.1).research
+    await coord.deliver(await coord.handle("Prepare the digest again", "demo"), send)  # Researcher is down now
+
+
+async def test_dashboard_shows_app_openclaw_and_researcher_in_one_trace(tmp_path, monkeypatch):
+    await _generate_traces(tmp_path)
 
     app_file = tmp_path / "traces" / "app" / "events.jsonl"
     researcher_file = tmp_path / "traces" / "researcher" / "events.jsonl"
@@ -56,6 +102,7 @@ async def test_dashboard_shows_app_openclaw_and_researcher_in_one_trace(tmp_path
     assert not at.exception
     timeline = at.dataframe[1].value
     assert {"app", "editor", "researcher"} <= set(timeline["agent"])
+    assert "Model calls · editor (OpenClaw)" in [m.label for m in at.metric]
     assert {"python", "openclaw"} <= set(timeline["runtime"])
     assert {"openclaw_call", "llm_input", "tool_call", "a2a_discovery", "a2a_send", "a2a_task", "rss_fetch",
             "memory_read", "telegram_send", "delivery"} <= set(timeline["kind"])

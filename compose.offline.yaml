@@ -1,14 +1,15 @@
 # OFFLINE integration check with the REAL OpenClaw Gateway and a controlled fake model provider.
 # Always use a separate project name so live volumes (memory, sessions, traces) are untouched:
 #
-#   docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml up -d --build \
+#   DASHBOARD_PORT=8502 docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml up -d --build \
 #       openclaw researcher fake-llm dashboard
 #   docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml run --rm --no-deps \
 #       app python scripts/openclaw_integration_check.py
 #   docker compose -p ai-news-digest-offline -f compose.yaml -f compose.offline.yaml down -v
 #
-# Proves: OpenClaw loads the editor workspace, applies the tool policy, runs hooks, keeps sessions,
-# and drives the app's tools and the real A2A exchange. Does NOT prove the real model or Telegram.
+# Proves: OpenClaw loads both agent workspaces (editor, researcher), applies the tool policy, runs hooks,
+# keeps sessions, and drives the app's and the Researcher's tools and the real A2A exchange.
+# Does NOT prove the real model, ChatGPT/Codex auth or Telegram.
 
 services:
   fake-llm:
@@ -31,22 +32,19 @@ services:
   openclaw-init:
     environment:
       OPENCLAW_EDITOR_MODEL: fake/scripted-coordinator
+      OPENCLAW_RESEARCHER_MODEL: fake/scripted-researcher
       OFFLINE_FAKE_LLM_URL: http://fake-llm:8000/v1
 
   openclaw:
     depends_on:
       fake-llm:
         condition: service_healthy
-    environment:
-      ANTHROPIC_API_KEY: ""
 
   researcher:
     depends_on:
       fake-llm:
         condition: service_healthy
     environment:
-      ANTHROPIC_API_KEY: ""
-      RESEARCHER_LLM: fake
       RESEARCHER_FIXED_NOW: "2026-10-10T12:00:00+00:00"
       SOURCES_FILE: /app/tests/fixtures/sources.offline.toml
 

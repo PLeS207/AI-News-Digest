@@ -17,7 +17,7 @@ from ai_news_digest.tracing import join_openclaw_events, read_events
 DEFAULT_FILES = ("data/traces/app/events.jsonl,data/traces/editor/events.jsonl,"
                  "data/traces/researcher/events.jsonl,data/traces/openclaw/events.jsonl")
 TRACE_FILES = [Path(p.strip()) for p in os.environ.get("TRACE_FILES", DEFAULT_FILES).split(",") if p.strip()]
-ROOT_AGENTS = ("app", "editor", "researcher")  # "editor" = pre-migration Python Editor traces
+ROOT_AGENTS = ("app", "editor", "researcher")  # "editor": historical traces of the earlier in-process Editor
 
 st.set_page_config(page_title="AI News Digest — agent traces", page_icon="🛰️", layout="wide")
 
@@ -126,9 +126,11 @@ STATUS_ICON = {"completed": "✅", "failed": "❌", "denied": "⛔", "rejected":
 def render() -> None:
     events = join_openclaw_events(read_events(TRACE_FILES))
     st.title("🛰️ AI News Digest — agent activity")
-    st.caption("Read-only view of real trace events: app (Telegram, backend tools, delivery; Python), "
-               "Editor/Coordinator (OpenClaw runtime, digest-telemetry plugin hooks) and Researcher "
-               f"(Python A2A agent). Sources: {', '.join(str(p) for p in TRACE_FILES)}")
+    st.caption("Read-only view of real trace events: app (Telegram, Coordinator tools, delivery; Python), "
+               "Editor/Coordinator and Researcher agents (OpenClaw runtime: model calls and tool choice, "
+               "digest-telemetry plugin hooks) and the Researcher service (Python: A2A server, RSS tools). "
+               "Token counts come from the runtime; no dollar cost is computed for subscription use. "
+               f"Sources: {', '.join(str(p) for p in TRACE_FILES)}")
     if not events:
         st.info("No trace events yet. Send a message to the bot, then refresh.")
         return
@@ -137,8 +139,11 @@ def render() -> None:
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Runs", len(runs))
     c2.metric("Failed runs", int((runs["status"] == "failed").sum()) if not runs.empty else 0)
-    c3.metric("LLM calls (OpenClaw)", sum(1 for e in events if _is_llm(e) and e.get("service") == "openclaw"))
-    c4.metric("LLM calls (Researcher)", sum(1 for e in events if _is_llm(e) and e.get("service") == "researcher"))
+    oc_llm = [e for e in events if _is_llm(e) and e.get("service") == "openclaw"]
+    legacy = sum(1 for e in events if _is_llm(e) and e.get("service") == "researcher")  # pre-OpenClaw Researcher
+    c3.metric("Model calls · editor (OpenClaw)", sum(1 for e in oc_llm if e["agent"] == "editor"))
+    c4.metric("Model calls · researcher (OpenClaw)", sum(1 for e in oc_llm if e["agent"] == "researcher"),
+              help=f"plus {legacy} legacy in-process Researcher calls" if legacy else None)
     c5.metric("Tool calls", sum(1 for e in events if e["kind"] == "tool_call" and e["status"] != "started"))
     c6.metric("A2A tasks", len({_task_id(e) for e in events if e["kind"] == "a2a_send" and _task_id(e)}))
 
@@ -162,12 +167,16 @@ def render() -> None:
             tl["status"] = tl["status"].map(lambda s: f"{STATUS_ICON.get(s, '')} {s}")
             st.subheader("Timeline")
             st.dataframe(tl, hide_index=True, width="stretch", height=560)
-            proof = [e for e in evs if e["kind"] == "llm_input"]
-            if proof:
-                d = _data(proof[0])
-                st.caption(f"OpenClaw evidence: workspace instructions loaded = {d.get('workspace_instructions_loaded')}, "
-                           f"native tools after policy = {d.get('native_tools_after_policy')}, "
-                           f"model = {d.get('provider')}/{d.get('model')}")
+            for agent in ("editor", "researcher"):
+                proof = [e for e in evs if e["kind"] == "llm_input" and e["agent"] == agent]
+                route = next((_data(e).get("api") for e in evs if e["kind"] == "llm_call" and e["agent"] == agent
+                              and _data(e).get("api")), None)
+                if proof:
+                    d = _data(proof[0])
+                    st.caption(f"OpenClaw evidence ({agent}): workspace instructions loaded = "
+                               f"{d.get('workspace_instructions_loaded')}, native tools after policy = "
+                               f"{d.get('native_tools_after_policy')}, model = {d.get('provider')}/{d.get('model')}, "
+                               f"route = {route}")
             errors = [e for e in evs if e.get("error")]
             if errors:
                 st.subheader("Errors")

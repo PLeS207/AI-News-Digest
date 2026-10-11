@@ -1,4 +1,4 @@
-"""Shared offline test fixtures: fixed clock, fixture feeds via httpx.MockTransport, fake LLMs."""
+"""Shared offline test fixtures: fixed clock, fixture feeds via httpx.MockTransport, fake OpenClaw Gateway."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from ai_news_digest.agents.llm import ScriptedBackend
-from ai_news_digest.testing.fakes import FakeGateway, researcher_script
+from ai_news_digest.openclaw_client import OpenClawClient
+from ai_news_digest.testing.fakes import FakeGateway
 from ai_news_digest.config import DigestDefaults, Limits, SourceConfig
 from ai_news_digest.tracing import Tracer
 
@@ -74,9 +74,15 @@ def researcher_tracer(tmp_path: Path) -> Tracer:
     return Tracer("researcher", tmp_path / "traces")
 
 
+def researcher_client(transport: httpx.AsyncBaseTransport) -> OpenClawClient:
+    """Client of the OpenClaw `researcher` agent over the given (fake) Gateway transport."""
+    return OpenClawClient("http://openclaw.test:18789", GATEWAY_TOKEN, agent_id="researcher", transport=transport)
+
+
 @pytest.fixture
-def researcher_llm() -> ScriptedBackend:
-    return ScriptedBackend(researcher_script, model="fake-researcher")
+def researcher_openclaw() -> OpenClawClient:
+    """The Researcher's model agent behind a FAKE Gateway (scripted: fetch every source, select every item)."""
+    return researcher_client(FakeGateway(token=GATEWAY_TOKEN, agent_id="researcher").transport())
 
 
 @pytest.fixture
@@ -87,7 +93,6 @@ def fake_gateway() -> FakeGateway:
 def make_coordinator(tmp_path, tracer, sources, defaults, research, gateway=None, transport=None,
                      db_name="memory.sqlite3"):
     from ai_news_digest.coordinator.memory import MemoryStore
-    from ai_news_digest.coordinator.openclaw_client import OpenClawClient
     from ai_news_digest.coordinator.service import CoordinatorService
 
     memory = MemoryStore(tmp_path / db_name, defaults)

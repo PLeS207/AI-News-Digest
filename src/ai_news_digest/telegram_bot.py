@@ -35,7 +35,7 @@ from ai_news_digest.config import (
 )
 from ai_news_digest.coordinator.delivery import resend_last_digest
 from ai_news_digest.coordinator.memory import MemoryStore
-from ai_news_digest.coordinator.openclaw_client import OpenClawClient
+from ai_news_digest.openclaw_client import OpenClawClient
 from ai_news_digest.coordinator.researcher_client import ResearcherClient
 from ai_news_digest.coordinator.service import CoordinatorService
 from ai_news_digest.tracing import Tracer, new_id
@@ -43,16 +43,17 @@ from ai_news_digest.tracing import Tracer, new_id
 log = logging.getLogger("app")
 
 HELP_TEXT = (
-    "Я собираю AI-новости из RSS и готовлю дайджест с учётом ваших интересов.\n"
-    "Coordinator работает в OpenClaw, поиск новостей — отдельный агент Researcher (A2A).\n\n"
-    "Примеры:\n"
-    "• Запомни: меня интересуют AI agents, MCP и AWS Bedrock. Пиши по-русски, максимум 3 новости\n"
-    "• /digest или «Подготовь дайджест AI-новостей за последние 72 часа»\n"
-    "• Какие интересы и настройки ты сохранил?\n"
-    "• /last или «Покажи последний дайджест»\n"
-    "• Собери ещё один дайджест, пропусти уже отправленные новости\n\n"
-    "Команды: /digest — новый дайджест, /settings — настройки из памяти, /last — последний дайджест, "
-    "/new — новая беседа (память сохраняется), /help"
+    "I collect AI news from RSS feeds and build a digest that matches your interests.\n"
+    "The Coordinator agent runs in OpenClaw; news research is a separate Researcher agent reached over A2A.\n\n"
+    "Examples:\n"
+    "• Remember: I'm interested in AI agents, MCP and AWS Bedrock. Write in English, at most 4 news items\n"
+    "• /digest or \"Prepare an AI news digest for the last 72 hours\"\n"
+    "• What interests and settings have you saved?\n"
+    "• /last or \"Show the last digest\"\n"
+    "• Build another digest and skip the news you already sent\n\n"
+    "Commands: /digest - new digest, /settings - settings from memory, /last - resend the last digest, "
+    "/new - new conversation (memory is kept), /help\n"
+    "You can write in any language; digests use the language saved in your settings."
 )
 
 HEARTBEAT_FILE = Path("/tmp/app-heartbeat")
@@ -82,35 +83,25 @@ async def process_text(
 ) -> dict[str, Any]:
     """Transport-independent message flow (used by the Telegram handlers and tests)."""
     if not gate.allowed(user_id):
-        await send("⛔ Доступ запрещён. Этот бот обслуживает только своего владельца.")
+        await send("⛔ Access denied. This bot serves only its owner.")
         return {"rejected": True}
     if on_start:
         await on_start()
-    turn = await coordinator.handle(text, chat_key, command=command)
-    report = await coordinator.deliver(turn, send)
+    async with coordinator.chat_lock(chat_key):
+        turn = await coordinator.handle(text, chat_key, command=command)
+        report = await coordinator.deliver(turn, send)
     return {"rejected": False, "trace_id": turn.trace_id, "kind": turn.kind, "failed": turn.failed,
             "openclaw_run_ids": turn.openclaw_run_ids, **report}
 
 
 def settings_text(memory: MemoryStore) -> str:
     settings, stored = memory.get_settings()
-    ru = settings.language.lower().startswith("ru")
-    src = "SQLite" if stored else ("значения по умолчанию" if ru else "defaults")
-    delivered = len(memory.delivered_urls(limit=10_000))
-    if ru:
-        lines = [f"⚙️ Настройки (источник: {src})", f"Интересы: {', '.join(settings.interests)}",
-                 f"Язык: {settings.language}", f"Новостей в дайджесте: до {settings.max_items}",
-                 f"Период: {settings.period_hours} ч"]
-        if settings.notes:
-            lines.append("Заметки: " + "; ".join(settings.notes))
-        lines.append(f"Доставлено ссылок: {delivered}")
-    else:
-        lines = [f"⚙️ Settings (source: {src})", f"Interests: {', '.join(settings.interests)}",
-                 f"Language: {settings.language}", f"Max items: {settings.max_items}",
-                 f"Period: {settings.period_hours} h"]
-        if settings.notes:
-            lines.append("Notes: " + "; ".join(settings.notes))
-        lines.append(f"Delivered links: {delivered}")
+    lines = [f"⚙️ Settings (source: {'SQLite' if stored else 'defaults'})",
+             f"Interests: {', '.join(settings.interests)}", f"Digest language: {settings.language}",
+             f"Max items per digest: {settings.max_items}", f"Period: {settings.period_hours} h"]
+    if settings.notes:
+        lines.append("Notes: " + "; ".join(settings.notes))
+    lines.append(f"Delivered links: {len(memory.delivered_urls(limit=10_000))}")
     return "\n".join(lines)
 
 
@@ -126,7 +117,7 @@ def build_application(token: str, gate: Gatekeeper, coordinator: CoordinatorServ
         user = update.effective_user
         if not gate.allowed(user.id if user else None):
             if update.effective_chat:
-                await update.effective_chat.send_message("⛔ Доступ запрещён.")
+                await update.effective_chat.send_message("⛔ Access denied.")
             return False
         return True
 
@@ -143,7 +134,7 @@ def build_application(token: str, gate: Gatekeeper, coordinator: CoordinatorServ
                                command=command)
         except Exception as exc:  # noqa: BLE001
             log.exception("failed to process message")
-            await chat.send_message(f"❌ Внутренняя ошибка: {type(exc).__name__}. Подробности в dashboard.")
+            await chat.send_message(f"❌ Internal error: {type(exc).__name__}. See the dashboard for details.")
 
     async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await guarded(update):
@@ -153,8 +144,8 @@ def build_application(token: str, gate: Gatekeeper, coordinator: CoordinatorServ
         if await guarded(update):
             coordinator.new_conversation(str(update.effective_chat.id))
             await update.effective_chat.send_message(
-                "🆕 Новая беседа: создана новая сессия OpenClaw Coordinator, краткосрочный контекст пуст. "
-                "Настройки, история дайджестов и доставленные ссылки сохранены в SQLite.")
+                "🆕 New conversation: a new OpenClaw Coordinator session was created; its short-term context is "
+                "empty. Settings, digest history and delivered links are kept in SQLite.")
 
     async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await guarded(update):

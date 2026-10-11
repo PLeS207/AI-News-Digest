@@ -17,38 +17,25 @@ TELEGRAM_LIMIT = 4096
 CHUNK_LIMIT = 3800  # headroom under Telegram's 4096-character limit
 MAX_LINK_TEXT = 120
 
+# Fixed headings and notes are English. Summaries and application notes are written by the Coordinator
+# model in the user's saved digest language (Digest.language), which therefore stays configurable.
 LABELS = {
-    "ru": {
-        "title": "🗞 AI-дайджест за последние {hours} ч",
-        "count": "Новостей: {n}",
-        "published": "Опубликовано",
-        "application": "Возможное применение для Cloud Architect / DevOps (вывод агента)",
-        "source_note": ("ℹ️ Саммари составлены по тексту RSS-анонсов; полные статьи не читались. "
-                        "Рекомендации о применении — вывод агента."),
-        "no_excerpt": "в RSS нет описания — саммари по заголовку",
-        "empty": "За последние {hours} ч релевантных новостей не найдено.",
-        "incomplete": "⚠️ Результат неполный: {reasons}",
-        "source_error": "источник {sid}: {err}",
-        "resent": "↩️ Повтор сохранённого дайджеста от {date}",
-    },
-    "en": {
-        "title": "🗞 AI digest for the last {hours} h",
-        "count": "Items: {n}",
-        "published": "Published",
-        "application": "Possible use for a Cloud Architect / DevOps (agent's inference)",
-        "source_note": ("ℹ️ Summaries are based on RSS announcement text; full articles were not read. "
-                        "Application notes are the agent's inference."),
-        "no_excerpt": "RSS has no description — summary based on the title",
-        "empty": "No relevant news found for the last {hours} h.",
-        "incomplete": "⚠️ Incomplete result: {reasons}",
-        "source_error": "source {sid}: {err}",
-        "resent": "↩️ Re-sending the saved digest from {date}",
-    },
+    "title": "🗞 AI digest for the last {hours} h",
+    "count": "Items: {n}",
+    "published": "Published",
+    "application": "Possible use for a Cloud Architect / DevOps (agent's inference)",
+    "source_note": ("ℹ️ Summaries are based on RSS announcement text; full articles were not read. "
+                    "Application notes are the agent's inference."),
+    "no_excerpt": "the RSS entry has no description; the summary is based on the title",
+    "empty": "No relevant news found for the last {hours} h.",
+    "incomplete": "⚠️ Incomplete result: {reasons}",
+    "source_error": "source {sid}: {err}",
+    "resent": "↩️ Re-sending the saved digest from {date}",
 }
 
 
-def labels(language: str) -> dict[str, str]:
-    return LABELS.get(language.lower()[:2], LABELS["en"])
+def labels(language: str) -> dict[str, str]:  # noqa: ARG001 - kept for callers; labels are language-neutral
+    return LABELS
 
 
 @dataclass

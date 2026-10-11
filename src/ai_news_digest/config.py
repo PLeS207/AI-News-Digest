@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_INTERESTS = ["AI agents", "MCP", "LLM", "AWS Bedrock", "developer tools"]
-DEFAULT_MODEL = "claude-opus-5-5"
 
 
 class ConfigError(RuntimeError):
@@ -29,7 +28,7 @@ class SourceConfig:
 class Limits:
     """Hard limits enforced in code (not by the prompt)."""
 
-    max_llm_iterations: int = 4
+    max_llm_iterations: int = 4  # Researcher: Gateway calls per A2A task (AGENT_MAX_ITERATIONS)
     max_tool_calls: int = 8
     max_total_entries: int = 30
     max_excerpt_chars: int = 600
@@ -38,19 +37,9 @@ class Limits:
 
 
 @dataclass(frozen=True)
-class LLMConfig:
-    api_key: str | None
-    model: str = DEFAULT_MODEL
-    effort: str = "low"
-    refusal_fallback: bool = True
-    max_tokens: int = 8000
-    timeout_seconds: float = 120.0
-
-
-@dataclass(frozen=True)
 class DigestDefaults:
     interests: list[str] = field(default_factory=lambda: list(DEFAULT_INTERESTS))
-    language: str = "ru"
+    language: str = "en"  # default for a fresh install; the stored user setting wins
     max_items: int = 5
     period_hours: int = 72
 
@@ -70,13 +59,6 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = _env(name)
-    if raw is None:
-        return default
-    return raw.lower() in {"1", "true", "yes", "on"}
 
 
 def load_sources(path: str | Path | None = None) -> list[SourceConfig]:
@@ -102,18 +84,9 @@ def load_limits() -> Limits:
     )
 
 
-def load_llm_config() -> LLMConfig:
-    return LLMConfig(
-        api_key=_env("ANTHROPIC_API_KEY"),
-        model=_env("ANTHROPIC_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL,
-        effort=_env("ANTHROPIC_EFFORT", "low") or "low",
-        refusal_fallback=_env_bool("ANTHROPIC_REFUSAL_FALLBACK", True),
-    )
-
-
 def load_digest_defaults() -> DigestDefaults:
     return DigestDefaults(
-        language=_env("DEFAULT_LANGUAGE", "ru") or "ru",
+        language=_env("DEFAULT_LANGUAGE", "en") or "en",
         max_items=_env_int("DEFAULT_MAX_ITEMS", 5),
         period_hours=_env_int("DEFAULT_PERIOD_HOURS", 72),
     )
@@ -181,8 +154,3 @@ def allowed_telegram_user_id() -> int:
     if value <= 0:
         raise ConfigError("ALLOWED_TELEGRAM_USER_ID must be a positive integer")
     return value
-
-
-def require_api_key(cfg: LLMConfig) -> None:
-    if not cfg.api_key:
-        raise ConfigError("ANTHROPIC_API_KEY is not set. Put your Anthropic API key into .env")
